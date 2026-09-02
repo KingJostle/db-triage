@@ -53,6 +53,21 @@ not by missing something — it is by sounding sure about something it estimated
 is overridable per target, and the reference section for each check names the assumption
 behind the number rather than presenting it as physics.
 
+**A title must be true of everything it reports, and a threshold must survive its own
+window.** A check whose title claims a magnitude has to enforce that magnitude; when the
+same underlying condition has two urgencies, they get two IDs and two bands, so suppressing
+the mild one can never hide the severe one. And a threshold read off a cumulative counter
+(`n_tup_upd`, `seq_scan`, `calls`, `sessions`) measures the age of the statistics as much as
+the workload: a lifetime count of 1,000 is a busy hour or four idle months, and the check
+cannot tell which. Where the number is meant to say "this is happening often", it is
+divided by the statistics window and expressed as a rate. **Known limitation:**
+`PG-IDX-010`, `PG-IDX-012`, `PG-SCHEMA-009`, `PG-VAC-012` and `PG-QRY-016` still gate on
+lifetime counters (1,000,000 writes or calls, 100 sequential scans). Each is one to three
+orders of magnitude above the figure that made `PG-IDX-008` misfire, and each is paired with
+a size or ratio gate, so none of them is a live false-positive source — but on a cluster
+whose counters have run for years they will drift toward being one, and they are the next
+candidates for the same rate treatment.
+
 **Absence of evidence is not evidence of absence.** "No monitoring agent is connected right
 now" is not "there is no monitoring". Checks of that shape are `confidence: low`, are
 phrased as *no evidence of*, and can be answered once in the config so they stop firing.

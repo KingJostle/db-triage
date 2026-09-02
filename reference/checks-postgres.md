@@ -634,6 +634,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `server log via pg_current_logfile()/pg_read_file`
 
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Autovacuum yields when it conflicts with a lock request, and logs "canceling autovacuum task". A handful of these is normal. Ten or more in a day on the same relation means something — usually a migration loop, a frequent `ALTER TABLE`, or an ORM taking stronger locks than it needs — is repeatedly preventing that table from ever being vacuumed.
 
 **How to fix.** Find what takes the conflicting lock and make it stop, or run it less often. The anti-wraparound vacuum does *not* yield, which is why a table in this state often sits fine for months and then triggers PG-WRAP-003.
@@ -695,7 +697,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** Point-in-time recovery needs two things: a base backup, and the stream of WAL written since. With `archive_mode = off` on a self-managed primary the second one does not exist, so the only recoverable states are the moments the base backups were taken. Everything after the newest one is gone. A `pg_dump` is a logical export taken at one instant — useful, but it is not PITR and it does not shrink the recovery point objective.
 
@@ -716,6 +719,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** pg_stat_archiver.failed_count > 0 AND last_failed_time > coalesce(last_archived_time, -infinity). WAL cannot be recycled, pg_wal grows, and the server eventually PANICs when the volume fills.
 
 **Reads.** `pg_stat_archiver`
+
+**Platform.** This check is reported at **P5** on rds, cloudsql, azure, supabase, crunchy, timescale, heroku; reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** A failing `archive_command` is an outage on a timer. WAL segments cannot be recycled until they are archived, so `pg_wal` grows at the rate WAL is generated. When the volume fills, the server PANICs and shuts down. Meanwhile PITR has already stopped: the recoverable window ended at the last successful archive, however long ago that was.
 
@@ -739,6 +744,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_archiver, pg_ls_archive_statusdir(), pg_current_wal_lsn()`
 
+**Platform.** This check is reported at **P5** on rds, cloudsql, azure, supabase, crunchy, timescale, heroku; reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Every completed WAL segment gets a `.ready` file in `pg_wal/archive_status`, removed when the archiver succeeds. A queue of them means the archiver is running slower than WAL is being produced, or has stopped succeeding. This is the same eventual outcome as PG-BAK-002 — `pg_wal` fills, the server PANICs — reached without a single error in the log, because a slow archiver is not a failing one.
 
 **How to confirm.** `SELECT count(*) FROM pg_ls_archive_statusdir() WHERE name LIKE '%.ready';` re-run a minute apart: the number should not be rising.
@@ -759,6 +766,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is reported at **P100** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** An `archive_command` of `true`, `/bin/true`, `:`, `exit 0` or a redirect to `/dev/null` exits successfully without storing anything. Everything downstream believes archiving works: `pg_stat_archiver.archived_count` rises, `failed_count` stays at zero, WAL is recycled on schedule, and monitoring based on those counters is green. There is no archive and no point-in-time recovery, and nothing in the server will ever say so.
 
 **How to confirm.** Look in the archive destination for the segments `pg_stat_archiver.last_archived_wal` claims were stored.
@@ -778,6 +787,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** archive_mode <> off and both archive_command and archive_library (15+) are empty. WAL is retained forever and the log fills with warnings.
 
 **Reads.** `pg_settings`
+
+**Platform.** This check is reported at **P100** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** With `archive_mode` on and no command or library to run, every completed segment is kept in `pg_wal` waiting for an archiver that cannot succeed. `pg_wal` grows without limit, the log fills with warnings, and the outcome is the same as PG-BAK-002 — usually faster, because nothing is draining at all.
 
@@ -815,6 +826,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_stat_replication`
 
+**Platform.** This check is reported at **P150** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** A WAL segment is archived when it fills. On a server that writes slowly, the current 16 MB segment can sit unarchived for hours, and everything in it is outside the recovery window for that whole time. `archive_timeout` forces a segment switch after a fixed interval, which bounds the exposure at the cost of one partly-filled segment per interval.
 
 **How to fix.** Set `archive_timeout` to the recovery point objective you actually promise — 60 to 300 seconds is typical. The cost is a 16 MB segment per interval regardless of how little is in it, so on a very quiet server this is a real storage trade rather than a free one.
@@ -834,6 +847,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `backup_age_days` = 7
 
 **Reads.** `external backup tool output, .db-triage.yml interview`
+
+**Platform.** This check is reported at **P100** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** The single most important fact about a database is whether it can be restored, and PostgreSQL has no backup history table to answer it. This check reads the backup tool's own output where one is reachable, and otherwise reports the honest answer: unverified. It fires at P1 with `confidence: low` rather than staying silent, because a report that omits backups reads as a report that found backups fine.
 
@@ -952,6 +967,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is reported at **P100** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `ignore_checksum_failure = on` turns the strongest corruption signal the database has into a WARNING it then ignores. The bad page is used: its rows flow into query results, into indexes built from them, into the WAL stream that reaches every replica, and into every backup taken afterwards. It converts a detectable failure into an undetectable one that spreads.
 
 **How to fix.** `ALTER SYSTEM RESET ignore_checksum_failure; SELECT pg_reload_conf();` and then treat any past failures as PG-CORR-001.
@@ -970,7 +987,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon
+**Platform.** This check is reported at **P150** on rds, cloudsql, azure, supabase, crunchy, timescale, heroku; reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** Without checksums, PostgreSQL has no way to notice that a page came back different from how it was written. Corruption is detected only when it happens to break something the server validates structurally; a flipped bit inside a value simply returns a wrong answer, and keeps returning it, into reports and into backups. Checksums do not prevent corruption; they are what makes it detectable while it is still one page.
 
@@ -993,6 +1011,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `scan_bytes` = 52,428,800
 
 **Reads.** `server log via pg_current_logfile()/pg_read_file`
+
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** Some corruption never reaches a checksum: a truncated relation file, a torn multi-page structure, a TOAST chunk that does not match its length. Those surface as specific error messages in the server log — "invalid page in block", "unexpected chunk number", "missing chunk number", "could not read block" — and they are frequently seen by one unlucky query, logged, and never noticed.
 
@@ -1067,6 +1087,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `fsync = off` tells PostgreSQL never to ask the operating system to make anything durable. Write-ahead logging still happens, but the WAL is not flushed before the commit returns and data pages are not flushed at checkpoint, so after an operating-system crash or power loss the on-disk state can be arbitrarily inconsistent — not merely missing the last few seconds, but unrecoverable. The documentation's own word for the result is that the database may be unrecoverable.
 
 **How to confirm.** `SHOW fsync;`
@@ -1086,6 +1108,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** full_page_writes = off. Torn pages after a crash are unrecoverable unless the filesystem guarantees atomic 8 kB writes (ZFS does; ext4 and xfs do not).
 
 **Reads.** `pg_settings`
+
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** A PostgreSQL page is 8 kB; most storage guarantees atomicity only at 512 bytes or 4 kB. A crash during a page write can therefore leave the page half-old and half-new — torn — and WAL replay cannot repair it, because WAL records describe changes relative to a page that is now neither version. `full_page_writes` fixes this by logging the entire page the first time it is touched after each checkpoint. Turning it off removes the repair mechanism.
 
@@ -1125,6 +1149,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_stat_replication`
 
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `sync_state = 'sync'` promises that a commit is safe on the standby before it returns. At `synchronous_commit = remote_write` the primary waits only for the standby's operating system to accept the WAL, not for it to reach durable storage; at `local` it waits for nothing on the standby at all. The topology says synchronous replication; the setting says otherwise, and a crash of the standby host is where the difference shows up.
 
 **How to fix.** Set `synchronous_commit = on` (or `remote_apply` if reads on the standby must see committed data) so the guarantee matches the topology. If the latency cost of `on` is the reason for the current setting, then the honest position is that this is asynchronous replication with a synchronous-looking configuration, and it should be documented as such.
@@ -1142,6 +1168,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** Any relation with relpersistence = 'u'. Contents are truncated on crash recovery and are never replicated to a standby.
 
 **Reads.** `pg_class`
+
+**Platform.** This check is reported at **P50** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** An unlogged relation is not written to WAL. Three consequences follow, and only the first is widely known: it is truncated to empty on crash recovery; it does not exist on any standby; and it is not in any base backup or PITR restore. The write performance is genuinely better, which is why it is used — and a table that was created unlogged for a good reason two years ago is now frequently holding something someone expects to survive.
 
@@ -1161,6 +1189,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** PostgreSQL picks the fastest flush method its build detected as safe on this platform. Overriding it is occasionally right for a specific storage stack and is more often a setting copied from a blog post whose original justification is long gone — and an unsafe method here silently weakens every durability guarantee above it.
 
 **How to fix.** Compare against the platform default reported in the finding. `pg_test_fsync` measures the alternatives on this host; unless it shows a real difference *and* the method is safe on this filesystem, reset it.
@@ -1178,7 +1208,7 @@ Read `reference/priorities.md` for what the priority numbers mean and
 ### PG-REPL-001 — Synchronous replication configured but no synchronous standby connected
 **Priority 1** · Replication and HA · scope: cluster · cost 0 · source: sql · pass: fast · effort S / risk med · since 0.1.0 · PostgreSQL 9.6+ · primary only · needs pg_monitor
 
-**What fires it.** synchronous_standby_names is non-empty, no pg_stat_replication row has sync_state = 'sync' or 'quorum', and synchronous_commit is not 'off' or 'local'. Commits are hanging right now.
+**What fires it.** synchronous_standby_names is non-empty, no pg_stat_replication row has sync_state = 'sync' or 'quorum', and synchronous_commit is not 'off' or 'local'. Commits are hanging right now. **Except on Neon**, where the named synchronous standby is `walproposer` — see *False positives* below.
 
 **Reads.** `pg_settings, pg_stat_replication`
 
@@ -1189,6 +1219,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **How to fix.** 1. If the standby is coming back, that is the fix: reconnect it. 2. If it is gone, `ALTER SYSTEM SET synchronous_standby_names = ''; SELECT pg_reload_conf();` unblocks commits immediately — and it also drops the durability guarantee those commits were promised, so it is a deliberate trade made under pressure, not a cleanup. 3. Afterwards, use a quorum specification (`ANY 1 (a, b)`) so the loss of one standby cannot do this again.
 
 **False positives and caveats.** `synchronous_commit = off` or `local` at the server level defeats synchronous replication regardless of the names, so the check requires neither to be set before firing.
+
+The one known false positive, and the reason the SQL changed in 0.2.0: **Neon**. Neon sets `synchronous_standby_names = 'walproposer'`, and walproposer is not a standby — it is a background worker inside the compute that ships WAL to a Paxos quorum of safekeepers and releases the commit when the quorum has it. That acknowledgement never appears as `sync_state = 'sync'` or `'quorum'` in `pg_stat_replication`, so the P1 conclusion "commits are hanging right now" was simply false: on Neon the commits were fine, and durability was the safekeepers'. The check now suppresses itself when the `neon_superuser` role is present **and** either `synchronous_standby_names` names `walproposer` or a `pg_stat_replication` row is called `walproposer`. Both halves matter: on a stock cluster that happens to have `synchronous_standby_names = 'walproposer'` and no such standby, commits really do hang and the check still fires at P1. This was fixed in the check rather than gated in the registry because the fault was in the check's model of the world, not in its priority — see [reference/platforms.md](platforms.md#pg-repl-001-on-neon-the-check-was-wrong-not-the-priority).
 
 **Further reading.** [PostgreSQL documentation](https://www.postgresql.org/docs/current/warm-standby.html#SYNCHRONOUS-REPLICATION)
 
@@ -1286,6 +1318,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_replication`
 
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** A standby a gigabyte or five minutes behind is not a failover target: promoting it either loses everything after its replay position or spends minutes applying the backlog first, during which it is not serving. It is also not a read replica in any useful sense, because the reads are answering with stale data by exactly that margin.
 
 **How to confirm.** `SELECT application_name, state, sync_state, write_lag, flush_lag, replay_lag, pg_size_pretty(pg_wal_lsn_diff(sent_lsn, replay_lsn)) FROM pg_stat_replication;`
@@ -1307,6 +1341,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `lag_bytes` = 104,857,600, `lag_seconds` = 30, `lag_bytes_high` = 1,073,741,824, `lag_seconds_high` = 300
 
 **Reads.** `pg_stat_replication`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** The same measurement as PG-REPL-006 at a threshold that is worth watching rather than acting on. A hundred megabytes or thirty seconds is normal on a busy primary during a batch job and abnormal at 3am.
 
@@ -1348,6 +1384,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_replication_slots`
 
+**Platform.** This check is reported at **P150** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `max_slot_wal_keep_size = -1` means a slot can retain WAL without limit. That is what makes PG-REPL-002 an outage rather than an inconvenience: a single stopped consumer can fill the WAL volume and PANIC the primary. Setting a cap converts that failure mode into a broken slot (PG-REPL-005), which costs one consumer a re-snapshot instead of costing everyone the database.
 
 **How to fix.** Size the cap to the WAL volume and to how long you want a consumer to be able to be away: `ALTER SYSTEM SET max_slot_wal_keep_size = '50GB'; SELECT pg_reload_conf();`. Then monitor `wal_status` so a slot that gets invalidated is noticed rather than discovered later.
@@ -1365,6 +1403,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** A pg_stat_replication row whose pid is not any slot's active_pid, while wal_keep_size (or wal_keep_segments before 13) is 0. Any network interruption that outlasts checkpoint recycling forces a rebuild of that standby.
 
 **Reads.** `pg_stat_replication, pg_replication_slots, pg_settings`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** Without a slot, the primary keeps only the WAL its own checkpoints have not yet recycled. A standby that disconnects for longer than that — a network partition, a reboot, a long GC pause — comes back asking for a segment that no longer exists and cannot resume. The recovery from that is a full base backup, which on a large database is measured in hours.
 
@@ -1446,6 +1486,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_replication`
 
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** With a synchronous standby, `flush_lag` is added directly to every commit on the primary. A second of flush lag means every write transaction takes a second longer than the primary's own work required — and the cause is on the other host, so nothing you measure on the primary explains it.
 
 **How to fix.** Look at the standby's storage: `flush_lag` is the time to get WAL onto its durable storage. Slow disks, a saturated network, or a standby doing heavy read work are the usual causes. If the latency is inherent, the honest options are to move the standby closer, or to accept asynchronous replication and say so.
@@ -1509,6 +1551,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_bgwriter (<=16) / pg_stat_checkpointer (17+)`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** A checkpoint happens either because `checkpoint_timeout` elapsed (timed) or because WAL volume reached `max_wal_size` (requested). Requested checkpoints are the bad kind: they are unpredictable, they bunch under load, and each one restarts full-page-image logging, so the WAL immediately after a checkpoint is several times larger than the changes it records. A server checkpointing on volume is generating more WAL, which triggers more checkpoints.
 
 **How to confirm.** `SELECT * FROM pg_stat_bgwriter;` (or `pg_stat_checkpointer` on PostgreSQL 17 and newer) — the ratio of requested to timed should fall.
@@ -1531,6 +1575,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_stat_wal`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** The shipped `max_wal_size` of 1 GB was chosen so PostgreSQL starts on a small machine. On a server generating a gigabyte of WAL an hour, it is consumed every hour, so checkpoints are driven by volume rather than by the clock — which is PG-WAL-001 with the cause named.
 
 **How to fix.** Raise it. The rule of thumb is enough WAL for at least one `checkpoint_timeout` of writing, so that timed checkpoints win: at 1 GB/hour and a 15-minute timeout, 2 GB is the floor and more is better. The cost is `pg_wal` disk.
@@ -1551,6 +1597,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `checkpoint_completion_target` is the fraction of the checkpoint interval over which the checkpointer spreads its writes. At 0.5 — the default before PostgreSQL 14 — the same dirty pages are written in half the time, which shows up as a periodic I/O spike and a matching latency spike every checkpoint.
 
 **How to fix.** `ALTER SYSTEM SET checkpoint_completion_target = 0.9; SELECT pg_reload_conf();`. This is the PostgreSQL 14 default and there is very little reason to run lower.
@@ -1568,6 +1616,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** pg_stat_bgwriter.buffers_backend_fsync > 0 or backend writes exceed checkpointer plus background-writer writes (<=16); from 16 the same signal is read from pg_stat_io for backend_type 'client backend'. The checkpointer and background writer cannot keep up.
 
 **Reads.** `pg_stat_bgwriter (<=16), pg_stat_io (16+)`
+
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** Dirty buffers are supposed to be written by the checkpointer and the background writer, off the critical path. When a backend cannot find a clean buffer to evict, it writes one itself — inside the query, while the user waits. A backend *fsync* is worse: it means the fsync request queue to the checkpointer was full, which only happens when the checkpointer is already behind.
 
@@ -1591,6 +1641,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_bgwriter`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** The background writer stops each cleaning round when it has written `bgwriter_lru_maxpages` buffers. Hitting that limit repeatedly means it is not cleaning as fast as buffers are being dirtied, so the shortfall is paid by backends writing their own (PG-WAL-004).
 
 **How to fix.** Raise `bgwriter_lru_maxpages` (default 100) and consider lowering `bgwriter_delay` (default 200 ms) so rounds happen more often. Both take effect on reload.
@@ -1610,6 +1662,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `waldir_multiple` = 3, `waldir_floor_bytes` = 53,687,091,200
 
 **Reads.** `pg_ls_waldir(), pg_settings`
+
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** `pg_wal` should hover around `max_wal_size` plus whatever `wal_keep_size` and the slots require. Several times that means something is preventing recycling, and `pg_wal` filling its volume is a PANIC rather than a degradation. This check is the symptom; the cause is one of: archiving failing or stalled (PG-BAK-002, PG-BAK-003), a slot retaining WAL (PG-REPL-002/003/004), or a large `wal_keep_size`.
 
@@ -1673,6 +1727,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_bgwriter (<=16) / pg_stat_checkpointer (17+)`
 
+**Platform.** This check is reported at **P200** on aurora, neon, alloydb. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** A checkpoint's sync phase is the fsync of every file it dirtied. A long sync phase is storage latency, not PostgreSQL: the checkpoint cannot complete, WAL accumulates while it waits, and the resulting latency shows up in commits that have nothing to do with the checkpoint.
 
 **How to fix.** This is a storage finding. Measure with `pg_test_fsync`; look for a saturated device, a network-attached volume with a shallow queue, or a write cache that has been disabled after a battery failure. `checkpoint_completion_target` and `max_wal_size` reduce how often you pay it, but not how long it takes.
@@ -1696,7 +1752,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is reported at **P100** on rds, cloudsql, azure, supabase, crunchy, timescale, heroku; reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** 128 MB is the value that lets PostgreSQL start on any machine, not the value that makes it work on this one. With a buffer cache that small, almost every read goes to the operating-system cache or the disk, the cache hit ratio the server reports is meaningless, and checkpoints write a small working set over and over.
 
@@ -1784,6 +1841,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_database_size()`
 
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** `maintenance_work_mem` bounds `CREATE INDEX`, `REINDEX`, `ALTER TABLE` rewrites and — before PostgreSQL 17 — the dead-tuple array that vacuum uses. A vacuum that fills that array has to stop, pass over every index, and start again: on a large table with several indexes, that is the difference between one index pass and five.
 
 **How to fix.** 1-2 GB is normal on a server with real memory. It is allocated per operation, not per connection, and only by maintenance operations — but note that autovacuum workers use `autovacuum_work_mem` if set, and inherit this value if not, so the true ceiling is this times `autovacuum_max_workers`.
@@ -1801,6 +1860,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** effective_cache_size is 4 GB with source = 'default'. The planner under-values index scans, because it believes only 4 GB is cached anywhere.
 
 **Reads.** `pg_settings`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** `effective_cache_size` allocates nothing. It tells the planner how much data it can expect to find cached, in `shared_buffers` plus the operating-system page cache, and that estimate is what makes repeated index lookups look cheap. Left at 4 GB on a host with more memory, the planner systematically over-estimates the cost of index scans and drifts towards sequential scans and hash joins on exactly the queries an index would win.
 
@@ -1842,6 +1903,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Mapping a large `shared_buffers` with 4 kB pages costs page-table entries per backend and constant TLB pressure — with hundreds of connections, the page tables themselves become gigabytes. 2 MB huge pages reduce that by a factor of 512 and remove the TLB misses.
 
 **How to fix.** Set `vm.nr_hugepages` on the host to cover `shared_buffers` plus overhead, then `huge_pages = on` and restart. Use `on` rather than `try`: with `on` the server refuses to start if huge pages are unavailable, which is a clear failure rather than a silent loss of the benefit.
@@ -1879,6 +1942,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `hit_ratio` = 0.90, `min_reads` = 1,000,000
 
 **Reads.** `pg_stat_database`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** The ratio of `blks_hit` to `blks_hit + blks_read` is widely quoted as a health metric and is a poor one. "Read" here means "not found in `shared_buffers`", which includes every block served instantly from the operating-system page cache — so a server with plenty of free memory and a 70 % ratio may be doing no physical I/O at all.
 
@@ -1945,6 +2010,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_stat_activity`
 
+**Platform.** This check is reported at **P150** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Each PostgreSQL connection is an operating-system process with its own memory, its own catalog caches, and its own entry in the shared proc array that every snapshot has to walk. Past a few hundred, the cost is not the idle connections themselves but the contention they add to everything else — and `max_connections` multiplies directly into the worst-case memory figure in PG-MEM-003.
 
 **How to fix.** Put a transaction-mode pooler in front and bring `max_connections` down to what the pooler actually opens, typically a small multiple of the core count. This is the single highest-leverage change on most over-connected servers, and it is an architecture change rather than a setting.
@@ -2004,6 +2071,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `abnormal_fraction` = 0.01, `min_sessions` = 10,000
 
 **Reads.** `pg_stat_database`
+
+**Platform.** This check is reported at **P150** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** Sessions ending abnormally are errors somebody is already seeing. `sessions_fatal` means the server refused or terminated them; `sessions_abandoned` means the client vanished without a clean disconnect, which is usually a network device or a container runtime cutting idle connections; `sessions_killed` means an administrator or a timeout ended them.
 
@@ -2271,7 +2340,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_hba_file_rules`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** `trust` means no authentication at all: the client says which role it wants and gets it. On a `host` rule with a non-local address, anyone who can reach the port is any role in the cluster, including superusers. There is no password to steal and no log entry that distinguishes an attacker from an application.
 
@@ -2293,7 +2363,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_hba_file_rules`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** The `password` method sends the password across the connection in clear text. On a `hostnossl` rule, or on a `host` rule where the client does not negotiate TLS, anyone on the network path reads it — and it is the same password that works from anywhere else the role is allowed.
 
@@ -2313,7 +2384,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings, pg_hba_file_rules`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** `listen_addresses = '*'` plus an HBA rule matching `0.0.0.0/0` means PostgreSQL's own access control places no network restriction at all. Whatever limits reachability — a security group, a firewall, a private subnet — is outside the database, and db-triage cannot see it.
 
@@ -2333,7 +2405,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** With `ssl = off` and non-local `listen_addresses`, the server cannot offer TLS on any connection. Every password exchange, every query and every result crosses the network in clear text — including the ones that carry the data you are protecting with everything else.
 
@@ -2393,7 +2466,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_hba_file_rules`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** A `local` `trust` rule means any operating-system account that can reach the Unix socket can connect as any role, including superusers, with no credential. That includes every process in the same container and anything that obtains a shell on the host. It is P100 rather than P1 because it requires host access first — but host access is exactly what an attacker gets from an unrelated vulnerability, and this turns it into full database compromise.
 
@@ -2598,6 +2672,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** Login roles whose pg_authid.rolpassword is null. Correct with peer, cert or LDAP authentication; a lockout or an exposure signal otherwise. The password column is tested for null only and never read into the report.
 
 **Reads.** `pg_authid`
+
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** A login role with no password authenticates by something else — peer, cert, LDAP, GSSAPI or an IAM plugin — which is correct and common. It can also mean the role was created and forgotten, or that a `trust` rule (PG-SEC-001, PG-SEC-007) is what lets it in. The two look identical from the catalog, which is why this is a review row.
 
@@ -2809,22 +2885,48 @@ Read `reference/priorities.md` for what the priority numbers mean and
 ---
 
 <a id="pg-idx-008"></a>
-### PG-IDX-008 — Unindexed foreign key on a large or write-active table
-**Priority 50** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.1.0
+### PG-IDX-008 — Unindexed foreign key on a large table
+**Priority 50** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.1.0 · threshold changed 0.2.0
 
-**What fires it.** A foreign-key constraint with no index whose leading key columns equal conkey in order, and either the child table is 100 MB or larger or the referenced table has 1,000 or more updates plus deletes. A parent DELETE or key UPDATE then sequentially scans the child under a share lock.
+**What fires it.** A foreign-key constraint with no index whose leading key columns equal conkey in order, on a child table of 100 MB or more. A parent DELETE or key UPDATE then sequentially scans the child under a share lock, and at this size one such scan is expensive whatever the parent's write rate is.
 
-**Thresholds.** `min_bytes` = 104,857,600, `parent_writes` = 1,000
+**Thresholds.** `min_bytes` = 104,857,600
 
-**Reads.** `pg_constraint, pg_index, pg_class, pg_stat_user_tables`
+**Reads.** `pg_constraint, pg_index, pg_class`
 
-**Why it matters.** PostgreSQL indexes the referenced side of a foreign key automatically and the referencing side not at all. So a `DELETE` on the parent, or an `UPDATE` of its key, has to check the child for rows that reference it — and with no matching index that is a sequential scan of the child, holding a lock, once per affected parent row. With `ON DELETE CASCADE` it is once per parent row *and* a delete pass. This turns a single-row parent delete into minutes of blocking on a large child.
+**Why it matters.** PostgreSQL indexes the referenced side of a foreign key automatically and the referencing side not at all. So a `DELETE` on the parent, or an `UPDATE` of its key, has to check the child for rows that reference it — and with no matching index that is a sequential scan of the child, holding a `KEY SHARE` lock, once per affected parent row. With `ON DELETE CASCADE` it is once per parent row *and* a delete pass. This turns a single-row parent delete into minutes of blocking on a large child.
 
 **How to confirm.** `EXPLAIN` a `DELETE` of one parent row in a transaction you roll back, and look for a sequential scan of the child.
 
 **How to fix.** `CREATE INDEX CONCURRENTLY ON <child> (<the foreign-key columns, in constraint order>);`. The order matters: PostgreSQL can only use an index whose *leading* columns match the constraint, so an index on `(b, a)` does not serve a foreign key on `(a, b)`.
 
-**False positives and caveats.** A child table that is never affected by parent deletes or key updates does not need the index; the check uses the parent's update and delete counts to judge, which is a heuristic.
+**False positives and caveats.** A child table that is never affected by parent deletes or key updates does not need the index at all, and this check does not look at the parent's activity: it fires on size alone, because at 100 MB a single such scan is already worth an index. A child that is large but whose parent is genuinely append-only is the false positive to expect here.
+
+**What changed in 0.2.0.** Until 0.2.0 this check fired on `child ≥ 100 MB` **or** `parent lifetime writes ≥ 1,000`, so its title was false of most of what it reported: in the field run that prompted the change, *no* child table reached 100 MB and all 129 findings came from the write arm, 108 of them because a `users` table had accumulated 1,290 writes in four months. The write arm now has its own ID and its own band — see PG-IDX-018 — and this ID means what its title says. The ID, title, priority and `object` format are unchanged, so existing suppressions on PG-IDX-008 keep working; what they no longer suppress is the mild tier, which is the point of splitting it.
+
+**Further reading.** [PostgreSQL documentation](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK)
+
+---
+
+<a id="pg-idx-018"></a>
+### PG-IDX-018 — Unindexed foreign key on a write-active parent
+**Priority 100** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.2.0
+
+**What fires it.** As PG-IDX-008 but the child is smaller than 100 MB: the referenced table takes 10,000 or more updates plus deletes a day averaged over the statistics window, **and** the child holds 100,000 or more rows. A child that has never been analyzed has no row estimate (`reltuples` is −1 on PostgreSQL 14+, 0 before) and is not evaluated here — PG-VAC-004 is the check for that.
+
+**Thresholds.** `max_bytes` = 104,857,600, `parent_writes_per_day` = 10,000, `min_child_rows` = 100,000, `top_n` = 20
+
+**Reads.** `pg_constraint, pg_index, pg_class, pg_stat_user_tables, pg_stat_database`
+
+**Why it matters.** Here the scan is not expensive because the child is big. It is expensive because it happens often, on enough rows to cost something each time. Every parent `DELETE` or key `UPDATE` runs the referential-integrity trigger, which with no usable index is a sequential scan of the child under a `KEY SHARE` lock. A child of 100,000 narrow rows scans in roughly 10 ms even fully cached; at 10,000 parent writes a day that is on the order of **100 seconds a day** of pure constraint-checking, all of it inside the parent's transaction and all of it taking locks on the child. That is a real cost, and it is not an emergency — hence P100 rather than PG-IDX-008's P50.
+
+**Why a rate and not a counter.** `n_tup_upd + n_tup_del` is cumulative since the last statistics reset, so a fixed lifetime threshold measures the age of the counters as much as the workload. The old threshold of 1,000 lifetime writes is satisfied by **eight writes a day for four months** — an idle table — which is exactly how 108 eight-kilobyte tables ended up in a P50 band claiming to be about large tables. Dividing by the statistics window makes the number mean the same thing on a cluster reset last night and on one reset last spring, and 10,000 a day is an order of magnitude above the old figure at any plausible window. The row's `confidence` falls to `medium` when the window is under 7 days and `low` under 24 hours, because a rate extrapolated from a few hours of counters is a guess.
+
+**How to confirm.** `SELECT n_tup_upd + n_tup_del, stats_reset FROM pg_stat_user_tables t, pg_stat_database d WHERE t.relname = '<parent>' AND d.datname = current_database();` and divide. Then `EXPLAIN` a rolled-back single-row `DELETE` on the parent and look for the sequential scan of the child.
+
+**How to fix.** `CREATE INDEX CONCURRENTLY ON <child> (<the foreign-key columns, in constraint order>);` — the same fix as PG-IDX-008, and cheap while the child is still small.
+
+**False positives and caveats.** The parent's write counters do not distinguish updates that touch the key from updates that do not; only key updates and deletes actually run the check, so the rate is an upper bound. `confidence: medium` below a 7-day statistics window. Partitioned parents report per-partition counters, so a heavily written partitioned parent can be spread thin enough to fall under the threshold.
 
 **Further reading.** [PostgreSQL documentation](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK)
 
@@ -2832,19 +2934,19 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 <a id="pg-idx-009"></a>
 ### PG-IDX-009 — Unindexed foreign key (small table)
-**Priority 150** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.1.0
+**Priority 150** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.1.0 · threshold changed 0.2.0
 
-**What fires it.** As IDX-008 but the child table is smaller than 100 MB and the parent is not write-active. Summary form.
+**What fires it.** As PG-IDX-008 but the child is smaller than 100 MB and it does not reach PG-IDX-018 either — the parent is below 10,000 updates plus deletes a day, or the child holds fewer than 100,000 rows. Capped at the 20 largest.
 
-**Thresholds.** `min_bytes` = 104,857,600, `parent_writes` = 1,000, `top_n` = 20
+**Thresholds.** `min_bytes` = 104,857,600, `parent_writes_per_day` = 10,000, `min_child_rows` = 100,000, `top_n` = 20
 
-**Reads.** `pg_constraint, pg_index, pg_class`
+**Reads.** `pg_constraint, pg_index, pg_class, pg_stat_user_tables, pg_stat_database`
 
-**Why it matters.** The same missing index on a table small enough that the scan is cheap today. It is listed because tables grow, and the day the child table crosses a few hundred megabytes this becomes PG-IDX-008 during whatever operation is running at the time.
+**Why it matters.** The same missing index on a table small enough, and a parent quiet enough, that the scan is cheap today. It is listed because tables grow, and the day the child crosses a few hundred megabytes or the parent gets busy this becomes PG-IDX-008 or PG-IDX-018 during whatever operation is running at the time.
 
 **How to fix.** Add the index when convenient; it is cheap to create while the table is small.
 
-**False positives and caveats.** Summary form.
+**False positives and caveats.** The 20 rows shown are the 20 largest children, but `details` and `evidence.unindexed_fk_total` carry the **full** count for the database, so the cap never hides the size of the backlog — which the 0.1.0 form did. This is the tier to suppress wholesale if your schema deliberately leaves small lookup-table foreign keys unindexed; suppressing it does not touch PG-IDX-008 or PG-IDX-018.
 
 **Further reading.** [PostgreSQL documentation](https://www.postgresql.org/docs/current/ddl-constraints.html#DDL-CONSTRAINTS-FK)
 
@@ -3798,6 +3900,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `REL-001, SEC-003`
 
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** An unpatchable server reachable from beyond its own host is the combination that turns a schedule problem into an exposure. Derived from PG-REL-001 and PG-SEC-003 both firing.
 
 **How to fix.** Reduce the exposure first — it is faster than an upgrade and buys the time to do the upgrade properly. Then upgrade.
@@ -3838,6 +3942,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `server_version_num, reference/versions.yml`
 
+**Platform.** This check is reported at **P150** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Minor releases fix bugs, including data-corruption and security bugs, and never change the on-disk format — so a minor upgrade is a binary swap and a restart, with no application testing required. Being several behind means carrying known, fixed bugs for no benefit.
 
 **How to fix.** Schedule the restart. Read the release notes between your version and the latest: they are short, and they occasionally contain a `REINDEX` instruction that matters.
@@ -3857,6 +3963,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `uptime_seconds` = 86,400
 
 **Reads.** `pg_postmaster_start_time()`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** A restart in the last 24 hours has two consequences for this report. Every counter-based finding covers only that window, so rates are unreliable and "0 index scans since reset" means nothing yet. And the restart itself is worth explaining: a planned restart for a configuration change looks identical from here to a crash, an automatic recovery, or an OOM kill.
 
@@ -3932,6 +4040,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_stat_activity, pg_roles, pg_extension`
 
+**Platform.** This check is reported at **P150** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** Every rate in this report is a since-reset average. Without a time series there is no way to tell a problem that started this morning from one that has been there for a year, and no way to see the trend that would have predicted it.
 
 **How to fix.** If there genuinely is no monitoring, that is the finding. If there is, record it under `interview:` so this stops firing and the report stops implying otherwise.
@@ -3972,6 +4082,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `server log`
 
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 **Why it matters.** "Terminated by signal 9" is the Linux OOM killer, and on PostgreSQL it usually takes the postmaster, which restarts the whole cluster and drops every session. "Database system was not properly shut down" means the last stop was a crash. Either way the cluster ran crash recovery, and the cause — almost always memory (PG-MEM-003) or storage — is still there.
 
 **How to fix.** For an OOM kill: PG-MEM-003, then `vm.overcommit_memory = 2` on Linux so an allocation fails in one backend instead of the kernel choosing a victim. For a crash: the log lines immediately before it are the evidence.
@@ -3989,6 +4101,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** restart_after_crash = off with no external supervisor recorded in baseline.supervisor. After any backend crash the cluster stays down until a human intervenes.
 
 **Reads.** `pg_settings`
+
+**Platform.** This check is reported at **P200** on neon. The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** With `restart_after_crash = off`, any backend dying abnormally shuts the whole cluster down and leaves it down, rather than running crash recovery and coming back. That is correct when an external cluster manager — Patroni, repmgr, a Kubernetes operator — needs to make the failover decision itself, and it is an outage waiting to happen when nothing external is watching.
 
@@ -4008,7 +4122,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 
 **Reads.** `pg_settings`
 
-**Skipped on.** rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
+
 
 **Why it matters.** With the logging collector off and `log_destination = stderr`, the server writes to whatever standard error it inherited. Under systemd that reaches the journal; under a container runtime it reaches the container log; started by hand from a shell that has since closed, it goes nowhere and is unrecoverable.
 
@@ -4029,6 +4144,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **Thresholds.** `errors_per_hour` = 100, `window_hours` = 24
 
 **Reads.** `server log`
+
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** A hundred errors an hour is a workload that is failing at a rate someone has stopped noticing. The distribution matters more than the count: a hundred an hour of one message is a single broken thing, and a hundred spread across twenty messages is a system nobody is watching.
 
@@ -4295,6 +4412,8 @@ Read `reference/priorities.md` for what the priority numbers mean and
 **What fires it.** One row per (connection type, authentication method) with the rule count, the line numbers, and the addresses, databases and roles matched. Skipped without the privilege to read pg_hba_file_rules; SEC-012 then says so.
 
 **Reads.** `pg_hba_file_rules`
+
+**Platform.** This check is **not run** on rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku (the finding is dropped and listed in XX-META-001 with reason `platform`). The reason for each is in [reference/platforms.md](platforms.md#per-platform-adaptations), and it is carried into the report next to this finding.
 
 **Why it matters.** `pg_hba.conf` grouped by connection type and authentication method, with line numbers. The shape of the file is usually more informative than any individual rule.
 

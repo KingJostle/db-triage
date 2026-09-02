@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+- **`PG-IDX-008` is split into three tiers instead of retitled.** The earlier fix here only
+  made the title honest ("large **or write-active** table"); this replaces it with the split
+  SKILL.md's own rule prescribes, and fixes the threshold that caused the noise in the first
+  place:
+  - `PG-IDX-008` (P50) now carries the size arm alone — child ≥ 100 MB — so "large table" is
+    true again.
+  - **`PG-IDX-018` (P100, new)** carries the write-activity arm, as a **rate**:
+    `parent_writes_per_day ≥ 10,000` **and** `min_child_rows ≥ 100,000`. The old threshold of
+    1,000 *lifetime* writes is met by eight writes a day for four months — an idle table —
+    which is exactly how 108 eight-kilobyte tables ended up in a P50 band about large tables.
+  - `PG-IDX-009` (P150) is the residual tier, capped at the 20 largest with the full count
+    carried in `details` and `evidence` so the cap is never silent.
+
+  On the Neon database that prompted this, the P50 index band goes from **129 findings to
+  zero**, and the whole report from 184 findings to 54, with no real signal lost: the two
+  materially-sized unindexed foreign keys on the hot delete path are still listed, now at
+  P150, which matches the measured cost.
+- **`PG-REPL-001` recognises Neon's walproposer in SQL** rather than being skipped wholesale.
+  The exemption is guarded by the `neon_superuser` fingerprint and matches only
+  `synchronous_standby_names = 'walproposer'` or a walsender of that name, so a genuinely
+  broken synchronous standby on Neon still fires — and the same name on a stock cluster,
+  where it *would* be a misconfiguration, is unaffected. `platform_skip=neon` is removed from
+  this check accordingly; `PG-DUR-001`, `PG-DUR-002` and `PG-CORR-003` keep theirs, because
+  those are provider-set values with no in-SQL way to tell a deliberate one from a mistake.
+
 ### Added
 - **The derived-check engine.** Nineteen registry rows carry `source=derived` and the CLI
   evaluated none of them: they were rows in a catalog that nothing ever produced.

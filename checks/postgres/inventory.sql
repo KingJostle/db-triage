@@ -294,10 +294,6 @@ SET bytea_output = 'hex';
 \else
 \set pg_idx_008_min_bytes 104857600
 \endif
-\if :{?pg_idx_008_parent_writes}
-\else
-\set pg_idx_008_parent_writes 1000
-\endif
 
 -- PG-IDX-010
 \if :{?pg_idx_010_min_bytes}
@@ -832,9 +828,13 @@ SET bytea_output = 'hex';
 \else
 \set pg_idx_009_min_bytes 104857600
 \endif
-\if :{?pg_idx_009_parent_writes}
+\if :{?pg_idx_009_parent_writes_per_day}
 \else
-\set pg_idx_009_parent_writes 1000
+\set pg_idx_009_parent_writes_per_day 10000
+\endif
+\if :{?pg_idx_009_min_child_rows}
+\else
+\set pg_idx_009_min_child_rows 100000
 \endif
 \if :{?pg_idx_009_top_n}
 \else
@@ -1037,6 +1037,24 @@ SET bytea_output = 'hex';
 \if :{?pg_wal_008_fpi_ratio}
 \else
 \set pg_wal_008_fpi_ratio 0.3
+\endif
+
+-- PG-IDX-018
+\if :{?pg_idx_018_max_bytes}
+\else
+\set pg_idx_018_max_bytes 104857600
+\endif
+\if :{?pg_idx_018_parent_writes_per_day}
+\else
+\set pg_idx_018_parent_writes_per_day 10000
+\endif
+\if :{?pg_idx_018_min_child_rows}
+\else
+\set pg_idx_018_min_child_rows 100000
+\endif
+\if :{?pg_idx_018_top_n}
+\else
+\set pg_idx_018_top_n 20
 \endif
 
 -- PG-QRY-003

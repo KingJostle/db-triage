@@ -1,15 +1,20 @@
 -- check: PG-IDX-008
--- title: Unindexed foreign key on a large or write-active table
+-- title: Unindexed foreign key on a large table
 -- priority: 50
 -- scope: relation
 -- cost: 1
--- thresholds: min_bytes, parent_writes
+-- thresholds: min_bytes
+--
+-- This is the size tier, and only the size tier: the child table is big enough
+-- that the sequential scan a parent DELETE or key UPDATE forces on it is
+-- expensive on its own, whatever the parent's write rate is. The write-activity
+-- tier is PG-IDX-018 and everything below both is PG-IDX-009, so a suppression
+-- of the mild tier can never hide this one.
 WITH fk AS (
   SELECT con.oid AS conoid, con.conname, con.conrelid, con.confrelid, con.conkey,
          cn.nspname AS child_schema, cc.relname AS child_table,
          pn.nspname AS parent_schema, pc.relname AS parent_table,
          pg_relation_size(con.conrelid) AS child_bytes,
-         coalesce(pt.n_tup_del + pt.n_tup_upd, 0) AS parent_writes,
          (SELECT string_agg(a.attname, ', ' ORDER BY k.ord)
           FROM unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)
           JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum) AS child_columns
@@ -18,7 +23,6 @@ WITH fk AS (
   JOIN pg_namespace cn  ON cn.oid = cc.relnamespace
   JOIN pg_class pc      ON pc.oid = con.confrelid
   JOIN pg_namespace pn  ON pn.oid = pc.relnamespace
-  LEFT JOIN pg_stat_user_tables pt ON pt.relid = con.confrelid
   WHERE con.contype = 'f'
     AND cn.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
 ),
@@ -34,23 +38,19 @@ unindexed AS (
 SELECT 'PG-IDX-008'::text AS check_id,
        'relation'::text AS scope,
        format('%I.%I.%I', current_database(), u.child_schema, u.child_table)::text AS object,
-       format('Foreign key %s on %s.%s (%s) references %s.%s and has no index whose leading columns match it. Child table %s, parent has had %s updates and deletes since the statistics reset. Every DELETE or key UPDATE on the parent has to sequentially scan the child under a lock to check the constraint, and ON DELETE CASCADE makes that scan happen per parent row. Thresholds: child size >= %s or parent writes >= %s. Fix: CREATE INDEX CONCURRENTLY ON %s.%s (%s).',
+       format('Foreign key %s on %s.%s (%s) references %s.%s and has no index whose leading columns match it. The child table is %s, at or above the %s threshold at which one such scan is expensive on its own. Every DELETE or key UPDATE on the parent has to sequentially scan the child under a lock to check the constraint, and ON DELETE CASCADE makes that scan happen per parent row. Fix: CREATE INDEX CONCURRENTLY ON %s.%s (%s).',
               u.conname, u.child_schema, u.child_table, u.child_columns,
               u.parent_schema, u.parent_table,
               pg_size_pretty(u.child_bytes),
-              to_char(u.parent_writes, 'FM999,999,999,999'),
               pg_size_pretty(:'pg_idx_008_min_bytes'::bigint),
-              to_char(:'pg_idx_008_parent_writes'::bigint, 'FM999,999,999,999'),
               quote_ident(u.child_schema), quote_ident(u.child_table), u.child_columns) AS details,
        json_build_object('constraint', u.conname,
                          'child_schema', u.child_schema, 'child_table', u.child_table,
                          'child_columns', u.child_columns,
                          'parent_schema', u.parent_schema, 'parent_table', u.parent_table,
-                         'child_bytes', u.child_bytes, 'parent_writes', u.parent_writes,
-                         'threshold_child_bytes', :'pg_idx_008_min_bytes'::bigint,
-                         'threshold_parent_writes', :'pg_idx_008_parent_writes'::bigint)::text AS evidence_json,
+                         'child_bytes', u.child_bytes,
+                         'threshold_child_bytes', :'pg_idx_008_min_bytes'::bigint)::text AS evidence_json,
        'high'::text AS confidence
 FROM unindexed u
 WHERE u.child_bytes >= :'pg_idx_008_min_bytes'::bigint
-     OR u.parent_writes >= :'pg_idx_008_parent_writes'::bigint
 ORDER BY u.child_bytes DESC;

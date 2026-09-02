@@ -294,10 +294,6 @@ SET bytea_output = 'hex';
 \else
 \set pg_idx_008_min_bytes 104857600
 \endif
-\if :{?pg_idx_008_parent_writes}
-\else
-\set pg_idx_008_parent_writes 1000
-\endif
 
 -- PG-IDX-010
 \if :{?pg_idx_010_min_bytes}
@@ -832,9 +828,13 @@ SET bytea_output = 'hex';
 \else
 \set pg_idx_009_min_bytes 104857600
 \endif
-\if :{?pg_idx_009_parent_writes}
+\if :{?pg_idx_009_parent_writes_per_day}
 \else
-\set pg_idx_009_parent_writes 1000
+\set pg_idx_009_parent_writes_per_day 10000
+\endif
+\if :{?pg_idx_009_min_child_rows}
+\else
+\set pg_idx_009_min_child_rows 100000
 \endif
 \if :{?pg_idx_009_top_n}
 \else
@@ -1037,6 +1037,24 @@ SET bytea_output = 'hex';
 \if :{?pg_wal_008_fpi_ratio}
 \else
 \set pg_wal_008_fpi_ratio 0.3
+\endif
+
+-- PG-IDX-018
+\if :{?pg_idx_018_max_bytes}
+\else
+\set pg_idx_018_max_bytes 104857600
+\endif
+\if :{?pg_idx_018_parent_writes_per_day}
+\else
+\set pg_idx_018_parent_writes_per_day 10000
+\endif
+\if :{?pg_idx_018_min_child_rows}
+\else
+\set pg_idx_018_min_child_rows 100000
+\endif
+\if :{?pg_idx_018_top_n}
+\else
+\set pg_idx_018_top_n 20
 \endif
 
 -- PG-QRY-003
@@ -1431,7 +1449,21 @@ SELECT 'PG-REPL-001'::text AS check_id,
 WHERE NOT pg_is_in_recovery()
   AND coalesce(nullif(trim(current_setting('synchronous_standby_names')), ''), '') <> ''
   AND current_setting('synchronous_commit') NOT IN ('off', 'local')
-  AND NOT EXISTS (SELECT 1 FROM pg_stat_replication WHERE sync_state IN ('sync', 'quorum'));
+  AND NOT EXISTS (SELECT 1 FROM pg_stat_replication WHERE sync_state IN ('sync', 'quorum'))
+  -- Neon: the named synchronous standby is walproposer, the compute's own WAL
+  -- service proposer. It takes a walsender slot with application_name
+  -- 'walproposer' expressly so that synchronous_standby_names can name it, then
+  -- ships WAL to a Paxos quorum of safekeepers and releases the commit when the
+  -- quorum acknowledges. That acknowledgement is not reported as sync_state
+  -- 'sync' or 'quorum', so the test above reads a hang that is not happening:
+  -- durability on Neon is the safekeepers' and the commit path is healthy.
+  -- Guarded by the neon_superuser fingerprint so that the same name on a stock
+  -- cluster -- where it would be a real misconfiguration -- still fires.
+  -- See reference/platforms.md and reference/checks-postgres.md#pg-repl-001.
+  AND NOT (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser')
+           AND (btrim(lower(trim(current_setting('synchronous_standby_names'))), '"''') = 'walproposer'
+                OR EXISTS (SELECT 1 FROM pg_stat_replication
+                           WHERE application_name = 'walproposer')));
 \echo '@@END PG-REPL-001'
 \else
 \echo '@@SKIP PG-REPL-001 needs PostgreSQL 9.6 or newer; primary only'

@@ -558,18 +558,50 @@ class TestRegistryTitles(unittest.TestCase):
                   newline="", encoding="utf-8") as fh:
             cls.rows = {r["check_id"]: r for r in csv.DictReader(fh)}
 
-    def test_idx_008_title_does_not_promise_a_large_table(self):
+    def test_idx_008_is_size_only_so_its_title_is_true(self):
+        """The original defect: one check with a size OR write-rate condition, titled
+        'on a large table'. It is now split, so IDX-008 carries only the size arm and
+        the title is accurate again."""
         row = self.rows["PG-IDX-008"]
-        self.assertIn("OR", row["condition"].upper(),
-                      "precondition for this test: the check has a two-armed condition")
-        self.assertNotIn("large table", row["title"].lower(),
-                         "the condition also fires on parent write activity, so a finding "
-                         "can name an 8 kB table; the title must not call it large")
+        self.assertIn("large table", row["title"].lower())
+        self.assertIn("min_bytes", row["thresholds"])
+        self.assertNotIn("parent_writes", row["thresholds"],
+                         "the write arm belongs to PG-IDX-018 now; IDX-008 must not "
+                         "keep a threshold that lets an 8 kB table be called large")
 
-    def test_idx_008_title_covers_the_write_active_arm(self):
-        title = self.rows["PG-IDX-008"]["title"].lower()
-        self.assertTrue("write-active" in title or "write active" in title,
-                        "title should name the arm that actually fires most often: %r" % title)
+    def test_idx_018_carries_the_write_active_arm(self):
+        row = self.rows["PG-IDX-018"]
+        self.assertIn("write-active", row["title"].lower())
+        self.assertIn("parent_writes_per_day", row["thresholds"],
+                      "the arm must be a rate, not a lifetime counter")
+        self.assertIn("min_child_rows", row["thresholds"])
+
+    def test_the_write_arm_is_a_rate_not_a_lifetime_counter(self):
+        """1,290 writes over four months is ~10/day and fired 129 findings. A per-day
+        rate with a child-row floor is what stops that."""
+        th = dict(p.split("=", 1) for p in self.rows["PG-IDX-018"]["thresholds"].split(";") if p)
+        self.assertGreaterEqual(int(th["parent_writes_per_day"]), 1000)
+        self.assertGreaterEqual(int(th["min_child_rows"]), 10000)
+
+    def test_the_three_idx_tiers_do_not_overlap(self):
+        p = {c: int(self.rows[c]["priority"]) for c in
+             ("PG-IDX-008", "PG-IDX-018", "PG-IDX-009")}
+        self.assertLess(p["PG-IDX-008"], p["PG-IDX-018"],
+                        "a 100 MB child outranks a write-active small one")
+        self.assertLess(p["PG-IDX-018"], p["PG-IDX-009"],
+                        "a write-active parent outranks the residual tier")
+
+    def test_repl_001_is_not_skipped_wholesale_on_neon(self):
+        """Its SQL recognises Neon's walproposer directly, guarded by the
+        neon_superuser fingerprint, so a genuinely broken synchronous standby on Neon
+        still fires. A blanket platform_skip would have hidden that."""
+        self.assertNotIn("neon", dt.split_platforms(self.rows["PG-REPL-001"]["platform_skip"]))
+        sql = open(os.path.join(ROOT, "checks", "postgres", "checks",
+                                "PG-REPL-001.sql"), encoding="utf-8").read()
+        self.assertIn("walproposer", sql)
+        self.assertIn("neon_superuser", sql,
+                      "the walproposer exemption must be fingerprint-guarded, or the "
+                      "same name on a stock cluster would be silently excused")
 
 
 class TestRegistryIntegrity(unittest.TestCase):
@@ -594,12 +626,16 @@ class TestRegistryIntegrity(unittest.TestCase):
         """Verified against a real Neon PostgreSQL 17.10 compute, 2026-09-02.
 
         Neon replaces the storage layer: the compute node is stateless and
-        durability is a safekeeper quorum, so these four are provider-set and
+        durability is a safekeeper quorum, so these three are provider-set and
         unchangeable by the tenant (neondb_owner is not a superuser). They are
         skipped on neon ONLY — on RDS, fsync=off is settable through a parameter
         group and would be a real alarm.
+
+        PG-REPL-001 is deliberately NOT in this list: its SQL recognises the
+        walproposer directly, which keeps the check alive on Neon for a genuinely
+        broken standby. See test_repl_001_is_not_skipped_wholesale_on_neon.
         """
-        for cid in ("PG-DUR-001", "PG-DUR-002", "PG-CORR-003", "PG-REPL-001"):
+        for cid in ("PG-DUR-001", "PG-DUR-002", "PG-CORR-003"):
             with self.subTest(check=cid):
                 row = next(r for r in self.rows if r["check_id"] == cid)
                 platforms = dt.split_platforms(row["platform_skip"])
