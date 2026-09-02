@@ -2,7 +2,38 @@
 
 ## [Unreleased]
 
+### Added
+- **The derived-check engine.** Nineteen registry rows carry `source=derived` and the CLI
+  evaluated none of them: they were rows in a catalog that nothing ever produced.
+  `derive_findings()` now emits **16** of the 19 from the preflight, the run bookkeeping and
+  `reference/versions.yml`:
+  - `PG-SEC-012` — the authentication posture was not verified. Previously a Neon or RDS run
+    printed four bare `permission denied for function pg_hba_file_rules` errors with check_id
+    `?` and left the reader to work out that `PG-SEC-001/002/003/006/007` had therefore not
+    evaluated. It now says so in the P0 band, names every check it blinded, and states that
+    their absence is a gap rather than a clean bill of health.
+  - `PG-REL-001`/`002`/`003`/`004` — major version past EOL, EOL *and* network-exposed,
+    within 180 days of EOL, and minor releases behind, read from `reference/versions.yml`.
+    They drop to `confidence: low` when that file is stale, as designed.
+  - `XX-META-001` through `XX-META-007` — checks skipped, privilege ceiling, statistics reset
+    within 24 h, stale version data, standby target, managed platform, and partial database
+    coverage. Plus `XX-META-009`/`010` (run metadata, credits) and `PG-BAK-010`.
+  - `PG-CFG-005` — drift from `baseline.settings`, derived from `PG-CFG-001`'s evidence. It
+    reports settings the baseline names that sit at the server default as differing but
+    unconfirmable, at `confidence: medium`, rather than pretending it can see them.
+  The three remaining rows are named in `XX-META-001` with the reason each is blocked
+  (`PG-CAP-003`/`PG-CAP-006` need `--save`/`--compare`, which do not exist; `PG-CORR-008` is
+  retired by design). A test fails if a future derived row is neither emitted nor documented
+  as blocked — the whole point being that a check which did not run must never read as one
+  that came back clean.
+- Markdown rendering for the P254 and P255 bands, which previously had no section at all, so
+  a finding in either was counted but invisible.
+
 ### Fixed
+- **`as_datetime()` could not parse the timestamp PostgreSQL actually emits.**
+  `2026-04-28 02:58:23.655268+00` failed on both the fractional seconds and the two-digit
+  UTC offset, which `%z` does not accept, so `XX-META-003` would have stayed silent forever.
+  Caught by writing the test before trusting the parser.
 - **`platform_skip` was never read.** The column had been in `checks/registry.csv` since
   0.1.0 and no code parsed it, so every managed-platform suppression in the catalog was
   inert. `bin/db-triage` now applies it: the check is dropped, listed in Appendix A with

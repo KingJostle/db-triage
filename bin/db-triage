@@ -294,6 +294,94 @@ def derived_finding(registry, check_id, details, evidence=None, confidence="high
             "source": r["source"], "engine": r["engine"], "suppressed": False}
 
 
+# Derived rows the CLI still cannot evaluate, with the reason each is blocked.
+# Named in XX-META-001 rather than left silent: a check that did not run must never
+# be mistaken for one that came back clean.
+UNIMPLEMENTED_DERIVED = {
+    "PG-CAP-003": "needs growth measured between two saved snapshots; --save/--compare "
+                  "are not implemented",
+    "PG-CAP-006": "needs a previous snapshot to diff against; --save/--compare are not "
+                  "implemented",
+    "PG-CORR-008": "retired by design: it never emits, and the row exists only so the "
+                   "identifier is never reused",
+}
+
+
+def pg_bool(value):
+    """psql --csv renders booleans as t/f."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("t", "true", "on", "yes", "1")
+
+
+def as_date(value):
+    if not value:
+        return None
+    try:
+        return datetime.strptime(str(value).strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def as_datetime(value):
+    """Parse a psql timestamptz loosely; return a tz-aware datetime or None.
+
+    PostgreSQL renders "2026-04-28 02:58:23.655268+00". strptime's %z accepts
+    neither the fractional seconds nor a two-digit offset, so both are normalised
+    first — without this the parse fails silently and XX-META-003 never fires.
+    """
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = re.sub(r"(?<=:\d\d)\.\d+", "", text, count=1)          # drop fractional seconds
+    if re.search(r"\d:\d", text):
+        # Only when a time is present: on a bare date "2026-09-02" the trailing
+        # "-02" is the day, not a UTC offset.
+        text = re.sub(r"([+-]\d{2}):(\d{2})$", r"\1\2", text)     # +00:00 -> +0000
+        text = re.sub(r"([+-]\d{2})$", r"\g<1>00", text)          # +00    -> +0000
+    for fmt in ("%Y-%m-%d %H:%M:%S%z", "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def version_tuple(value):
+    """'17.10' -> (17, 10). Numeric on purpose: as strings, '17.10' < '17.6'."""
+    parts = []
+    for chunk in re.split(r"[._-]", str(value).strip()):
+        if not chunk.isdigit():
+            break
+        parts.append(int(chunk))
+    return tuple(parts) or (0,)
+
+
+def major_minor(version_num):
+    """server_version_num -> ('17', 10). PostgreSQL 10+ only; 9.x returns (None, None)."""
+    try:
+        n = int(version_num)
+    except (TypeError, ValueError):
+        return None, None
+    if n < 100000:
+        return None, None
+    return str(n // 10000), n % 100
+
+
+def load_versions():
+    p = os.path.join(ROOT, "reference", "versions.yml")
+    if not os.path.exists(p):
+        return {}
+    try:
+        return parse_mini_yaml(open(p, encoding="utf-8").read()) or {}
+    except Exception:
+        return {}
+
+
 def threshold_var(check_id, key):
     return check_id.lower().replace("-", "_") + "_" + key
 
@@ -598,7 +686,9 @@ def render_markdown(findings, run, skipped, suppressed, errors, next_actions=Non
     for band, heading in [(200, "4. Configuration inventory (P200)"),
                           (230, "5. Security review (P230)"),
                           (240, "6. Workload profile (P240)"),
-                          (250, "7. Environment (P250)")]:
+                          (250, "7. Environment (P250)"),
+                          (254, "7a. Run metadata (P254)"),
+                          (255, "7b. Credits (P255)")]:
         rows = [f for f in visible if f["priority"] == band]
         if not rows:
             continue
@@ -672,6 +762,283 @@ def render_csv(findings):
 
 
 # ---------------------------------------------------------------------- main
+
+def derive_findings(run, preflight, registry, config, findings, skipped, errors, mode="fast"):
+    """Findings the runner works out for itself rather than reading from SQL.
+
+    Nineteen registry rows carry source=derived. Everything decidable from the
+    preflight, the run bookkeeping and reference/versions.yml is decided here; the
+    three that are genuinely blocked are named in XX-META-001 with their reason.
+    """
+    out = []
+    core = (preflight.get("core") or [{}])[0]
+    fired = {f["check_id"] for f in findings}
+    plat = run.get("platform")
+    today = datetime.now(timezone.utc).date()
+    now = datetime.now(timezone.utc)
+
+    def add(cid, details, evidence=None, confidence="high"):
+        f = derived_finding(registry, cid, details, evidence, confidence)
+        if f is not None:
+            out.append(f)
+
+    # ---- version data, and whether it is fresh enough to be believed ----------
+    versions = load_versions()
+    as_of = as_date(versions.get("as_of"))
+    versions_age = (today - as_of).days if as_of else None
+    versions_stale = versions_age is not None and versions_age > 180
+    rel_conf = "low" if (versions_stale or as_of is None) else "high"
+
+    # ---- XX-META-005: standby ------------------------------------------------
+    if pg_bool(core.get("in_recovery")):
+        add("XX-META-005",
+            "pg_is_in_recovery() is true: this is a standby, not the primary. Primary-only "
+            "checks were skipped, and every usage counter below — index scans, sequential "
+            "scans, statement statistics — describes this replica's own workload, not the "
+            "primary's. An index that looks unused here may be busy on the primary.",
+            {"in_recovery": True, "connected_role": core.get("connected_role")})
+
+    # ---- XX-META-002: privilege ceiling --------------------------------------
+    if core and not (pg_bool(core.get("has_pg_monitor"))
+                     or pg_bool(core.get("has_read_all_stats"))
+                     or pg_bool(core.get("is_superuser"))):
+        add("XX-META-002",
+            "Connected as %s, which is not a member of pg_monitor and lacks "
+            "pg_read_all_stats. pg_stat_activity.query is masked for other users' sessions "
+            "and pg_stat_statements rows for other roles are hidden, so the lock, session "
+            "and workload findings describe only what this role can see. Grant "
+            "pg_monitor for a complete picture."
+            % (core.get("connected_role") or "an unprivileged role"),
+            {"connected_role": core.get("connected_role"),
+             "has_pg_monitor": pg_bool(core.get("has_pg_monitor")),
+             "has_read_all_stats": pg_bool(core.get("has_read_all_stats"))})
+
+    # ---- XX-META-003: statistics reset too recently to trust -----------------
+    reset = as_datetime(core.get("earliest_stats_reset"))
+    if reset:
+        age_h = (now - reset).total_seconds() / 3600.0
+        if 0 <= age_h < 24:
+            add("XX-META-003",
+                "The earliest statistics reset is %s, %.1f hours ago. Every counter-based "
+                "finding — unused indexes, sequential scans, cache hit ratios, deadlocks "
+                "per day — is measured over that window and means very little yet. Treat "
+                "'0 scans since reset' as 'no data', not as 'unused'."
+                % (reset.isoformat(sep=" ", timespec="seconds"), age_h),
+                {"earliest_stats_reset": str(core.get("earliest_stats_reset")),
+                 "window_hours": round(age_h, 2)}, confidence="high")
+
+    # ---- XX-META-006: managed platform --------------------------------------
+    if plat and plat != "self-managed":
+        adapted = sorted({s["check_id"] for s in skipped
+                          if str(s.get("reason", "")).startswith("platform:")})
+        add("XX-META-006",
+            "Platform fingerprinted as %s. %s Everything else — wraparound, bloat, slots, "
+            "locks, indexes, roles and workload — ran unchanged; a managed instance is not "
+            "a black box, it is a box with a few specific holes in it."
+            % (plat,
+               ("%d check(s) did not run because the provider owns the setting they read, "
+                "so their silence is not evidence of health: %s."
+                % (len(adapted), ", ".join(adapted))) if adapted
+               else "No check was skipped for this platform."),
+            {"platform": plat, "checks_skipped": adapted})
+
+    # ---- PG-BAK-010: the provider owns backups ------------------------------
+    if plat and plat != "self-managed":
+        add("PG-BAK-010",
+            "Backups on %s happen outside PostgreSQL, so archive_mode and pg_stat_archiver "
+            "say nothing about whether this database is recoverable — and PG-BAK-001 was "
+            "skipped for that reason. Confirm in the provider console that automated "
+            "backup retention is greater than zero and that point-in-time recovery is "
+            "enabled. On RDS a retention period of 0 disables automated backups entirely, "
+            "and nothing inside the database can see that." % plat,
+            {"platform": plat}, confidence="medium")
+
+    # ---- XX-META-007: run did not cover everything --------------------------
+    if run.get("databases_capped"):
+        add("XX-META-007",
+            "%s. Per-database findings — indexes, bloat, sequences, schema — describe only "
+            "the databases that were scanned; the rest were not examined and are not known "
+            "to be clean." % run["databases_capped"],
+            {"databases_scanned": run.get("databases"),
+             "note": run.get("databases_capped")})
+
+    # ---- PG-SEC-012: authentication posture unverified ----------------------
+    hba_errors = [e for e in errors if "pg_hba_file_rules" in str(e.get("message", ""))]
+    hba_count = str(core.get("hba_rule_count") or "").strip()
+    hba_blind = bool(hba_errors) or (core != {} and hba_count in ("", "0", "None")
+                                     and not pg_bool(core.get("is_superuser")))
+    if hba_blind:
+        blinded = ["PG-SEC-001", "PG-SEC-002", "PG-SEC-003", "PG-SEC-006", "PG-SEC-007"]
+        add("PG-SEC-012",
+            "pg_hba_file_rules could not be read as %s%s, so the authentication posture "
+            "was NOT verified. %s did not evaluate: nothing here says whether trust "
+            "authentication, cleartext passwords or world-open host rules are in use. "
+            "Their absence from this report is a gap, not a clean bill of health.%s"
+            % (core.get("connected_role") or "this role",
+               " — superuser is withheld on %s" % plat if plat and plat != "self-managed" else "",
+               ", ".join(blinded),
+               " %d permission error(s) were raised; see Appendix A." % len(hba_errors)
+               if hba_errors else ""),
+            {"connected_role": core.get("connected_role"),
+             "hba_rule_count": core.get("hba_rule_count"),
+             "checks_blinded": blinded, "permission_errors": len(hba_errors),
+             "platform": plat})
+
+    # ---- PG-REL-001/002/003/004: version lifecycle --------------------------
+    major, minor = major_minor(core.get("version_num"))
+    majors = ((versions.get("postgresql") or {}).get("majors") or {})
+    row = majors.get(major) if major else None
+    server_minor_text = "%s.%s" % (major, minor) if major else (core.get("version_short") or "?")
+    minor_ahead_of_registry = False
+    if isinstance(row, dict):
+        eol = as_date(row.get("eol"))
+        if eol:
+            days = (eol - today).days
+            if days < 0:
+                add("PG-REL-001",
+                    "PostgreSQL %s reached end of life on %s, %d days ago. No security "
+                    "fixes are issued for it: a vulnerability disclosed today will never be "
+                    "patched on this server. Upgrading a major version needs planning — "
+                    "pg_upgrade or logical replication, an extension audit and a "
+                    "maintenance window."
+                    % (major, eol.isoformat(), -days),
+                    {"major": major, "eol": eol.isoformat(), "days_past_eol": -days,
+                     "versions_as_of": str(versions.get("as_of"))}, confidence=rel_conf)
+                if "PG-SEC-003" in fired:
+                    add("PG-REL-002",
+                        "PostgreSQL %s is past end of life (%s) AND PG-SEC-003 fired: the "
+                        "server listens on all interfaces with world-open host rules. An "
+                        "unpatchable database is reachable from beyond its host. Treat the "
+                        "network exposure as the emergency and the upgrade as the fix."
+                        % (major, eol.isoformat()),
+                        {"major": major, "eol": eol.isoformat()}, confidence=rel_conf)
+            elif days <= 180:
+                add("PG-REL-003",
+                    "PostgreSQL %s reaches end of life on %s, in %d days. After that no "
+                    "security fixes are issued. Major upgrades take planning, so start now "
+                    "rather than at the deadline."
+                    % (major, eol.isoformat(), days),
+                    {"major": major, "eol": eol.isoformat(), "days_to_eol": days},
+                    confidence=rel_conf)
+        latest = row.get("latest_minor")
+        if latest and minor is not None:
+            server_t, latest_t = version_tuple(server_minor_text), version_tuple(latest)
+            if server_t > latest_t:
+                # The server is newer than anything this registry knows about, which is
+                # itself evidence that versions.yml has not been refreshed.
+                minor_ahead_of_registry = True
+            elif len(latest_t) > 1 and (latest_t[1] - minor) >= 2:
+                add("PG-REL-004",
+                    "Running %s; the latest minor for this major known to db-triage is %s, "
+                    "%d releases ahead (recorded %s). Minor releases are cumulative "
+                    "security and bug fixes, and applying one is a binary swap and a "
+                    "restart — no dump, no reindex, no application change."
+                    % (server_minor_text, latest, latest_t[1] - minor,
+                       str(versions.get("as_of"))),
+                    {"server_version": server_minor_text, "latest_minor": latest,
+                     "releases_behind": latest_t[1] - minor}, confidence=rel_conf)
+
+    # ---- XX-META-004: this tool's own data is stale -------------------------
+    if versions_stale or minor_ahead_of_registry or as_of is None:
+        if as_of is None:
+            why = "reference/versions.yml has no readable as_of date"
+        elif minor_ahead_of_registry:
+            why = ("this server runs %s, which is newer than the latest minor "
+                   "reference/versions.yml records for major %s (%s) — the file has not "
+                   "been refreshed since that release"
+                   % (server_minor_text, major, (row or {}).get("latest_minor")))
+        else:
+            why = ("reference/versions.yml is dated %s, %d days old (threshold 180)"
+                   % (as_of.isoformat(), versions_age))
+        add("XX-META-004",
+            "%s. The end-of-life and latest-minor findings (PG-REL-001 through PG-REL-004) "
+            "are only as good as that file, so they are reported at low confidence. Refresh "
+            "it from the PostgreSQL versioning and security pages before acting on them. "
+            "registry.csv carries no generated_at field, so the registry's own age could "
+            "not be checked." % why,
+            {"versions_as_of": str(versions.get("as_of")), "versions_age_days": versions_age,
+             "server_newer_than_registry": minor_ahead_of_registry})
+
+    # ---- PG-CFG-005: drift from the supplied baseline -----------------------
+    baseline_settings = ((config.get("baseline") or {}).get("settings") or {})
+    if baseline_settings:
+        observed = {}
+        for f in findings:
+            if f["check_id"] == "PG-CFG-001" and isinstance(f.get("evidence"), dict):
+                ev = f["evidence"]
+                if ev.get("setting") is not None:
+                    observed[str(ev["setting"])] = str(ev.get("value"))
+        diffs, at_default = [], []
+        for name, want in sorted(baseline_settings.items()):
+            want = str(want)
+            if name in observed:
+                if observed[name] != want:
+                    diffs.append("%s = %s, baseline says %s" % (name, observed[name], want))
+            else:
+                # PG-CFG-001 lists every non-default setting, so absence means this one
+                # is at its shipped default — which differs from the baseline unless the
+                # baseline happens to restate the default. The default is not captured
+                # here, so name the fact rather than guess the value.
+                at_default.append("%s (baseline %s)" % (name, want))
+        if diffs or at_default:
+            parts = []
+            if diffs:
+                parts.append("%d setting(s) differ: %s" % (len(diffs), "; ".join(diffs)))
+            if at_default:
+                parts.append("%d setting(s) named in the baseline are at this server's "
+                             "shipped default, so they differ unless the baseline restates "
+                             "that default: %s" % (len(at_default), "; ".join(at_default)))
+            add("PG-CFG-005",
+                "Compared %d baseline setting(s) against this server. %s. This is a "
+                "fleet-consistency answer to 'why is this node different', not a judgement "
+                "that either value is wrong."
+                % (len(baseline_settings), ". ".join(parts)),
+                {"compared": len(baseline_settings), "differing": diffs,
+                 "at_default": at_default},
+                confidence="medium" if at_default else "high")
+
+    # ---- XX-META-001: what did not run --------------------------------------
+    blocked = sorted(k for k in UNIMPLEMENTED_DERIVED if k in registry)
+    if skipped or blocked:
+        by_reason = Counter()
+        for s in skipped:
+            reason = str(s.get("reason", "unspecified"))
+            key = ("platform" if reason.startswith("platform:")
+                   else "standby/version gate" if ("standby" in reason or "version" in reason
+                                                   or "newer" in reason or "older" in reason)
+                   else "error" if reason.startswith("error:")
+                   else "expired suppression" if "expired suppression" in reason
+                   else "other")
+            by_reason[key] += 1
+        summary = ", ".join("%d %s" % (n, k) for k, n in sorted(by_reason.items()))
+        add("XX-META-001",
+            "%d check(s) did not run (%s); each is listed with its reason in Appendix A. "
+            "%d further registry row(s) are not evaluated by this CLI at all: %s. None of "
+            "these came back clean — they came back not asked."
+            % (len(skipped), summary or "no reason recorded", len(blocked),
+               "; ".join("%s (%s)" % (k, UNIMPLEMENTED_DERIVED[k]) for k in blocked)),
+            {"skipped_count": len(skipped), "by_reason": dict(by_reason),
+             "not_implemented": blocked})
+
+    # ---- XX-META-009 / XX-META-010: metadata and credits --------------------
+    add("XX-META-009",
+        "Run: target %s, %s %s, connected as %s, platform %s, mode %s, access %s. "
+        "Counters cover %s. %d check(s) with findings, %d skipped. db-triage %s. "
+        "No password appears in this report."
+        % (run.get("target"), run.get("engine"), run.get("server_version") or "version unknown",
+           core.get("connected_role") or "unknown", plat or "unknown", mode,
+           run.get("access"), run.get("stats_window"),
+           len({f["check_id"] for f in findings}), len(skipped), VERSION),
+        {k: run.get(k) for k in ("target", "engine", "server_version", "platform", "mode",
+                                 "access", "stats_window", "in_recovery")})
+    add("XX-META-010",
+        "db-triage %s. Read-only by construction: this run issued only SELECT, SHOW and "
+        "session-scoped SET, and changed nothing. Methodology modelled on Brent Ozar's SQL "
+        "Server First Responder Kit; no code copied, not affiliated." % VERSION,
+        {"db_triage_version": VERSION})
+
+    return out
+
 
 def enrich(findings, registry, config, platform=None, skipped=None):
     """Attach registry metadata, drop platform-inapplicable checks, de-duplicate.
@@ -872,31 +1239,17 @@ def main():
     findings, suppressed = enrich(findings, registry, config,
                                   platform=run.get("platform"), skipped=skipped)
 
-    # A managed platform changes what is knowable, not only what is true. Say so in
-    # the report body, not only in the skipped appendix: a check that did not run is
-    # not a check that came back clean.
-    platform = run.get("platform")
-    if platform and platform != "self-managed":
-        adapted = sorted({s["check_id"] for s in skipped
-                          if str(s.get("reason", "")).startswith("platform:")})
-        if adapted:
-            m6 = derived_finding(
-                registry, "XX-META-006",
-                "Platform fingerprinted as %s. %d check(s) did not run because the provider "
-                "owns the setting they read, so their silence is not evidence of health: %s. "
-                "Everything else — wraparound, bloat, slots, locks, indexes, roles and "
-                "workload — ran unchanged."
-                % (platform, len(adapted), ", ".join(adapted)),
-                {"platform": platform, "checks_skipped": adapted})
-            if m6:
-                findings.append(m6)
-                findings.sort(key=lambda f: (f["priority"], f["category"], f.get("object") or ""))
-
     for rule in expired_suppressions(config.get("skip")):
         skipped.append({"check_id": rule.get("check", rule.get("category", rule.get("object", "?"))),
                         "reason": "expired suppression (until %s) — ignored and reported" % rule.get("until")})
 
     skipped = dedupe_skips(skipped)
+
+    # Derived findings are worked out from the preflight and the run bookkeeping, so
+    # they come last: XX-META-001 in particular reports on the final skip list.
+    findings += derive_findings(run, preflight, registry, config,
+                                findings, skipped, errors, args.mode)
+    findings.sort(key=lambda f: (f["priority"], f["category"], f.get("object") or ""))
 
     if args.category:
         want = {c.strip().upper() for c in args.category.split(",")}

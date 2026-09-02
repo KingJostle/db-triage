@@ -8,7 +8,7 @@
 | `test_runner.py` | Pure-function regression tests for `bin/db-triage`: no database, no network, standard library only. Run with `python3 tests/test_runner.py`. |
 
 ```bash
-python3 tests/test_runner.py        # 30 tests, ~0.01s
+python3 tests/test_runner.py        # 83 tests, ~0.02s
 ```
 
 `test_runner.py` covers the three defects found when db-triage was first run against a
@@ -22,6 +22,14 @@ managed platform (Neon, 2026-09-02), each of which distorted the report:
    silently never looked at* while the report claimed it had been. This is the worse half of
    the bug — the duplicates were merely the visible symptom.
 3. **`PG-IDX-008`'s title contradicted its condition**, calling an 8 kB table "large".
+
+It also covers the derived-check engine added afterwards. Sixteen of the nineteen
+`source=derived` registry rows are now evaluated by `derive_findings()` — including
+`PG-SEC-012`, which is what makes a report say "authentication was NOT verified" instead of
+printing four bare psql permission errors and leaving the reader to infer it. The three that
+remain are listed in `XX-META-001` with the reason each is blocked, and
+`TestDerivedCoverage` fails if a new derived row is added that is neither emitted nor
+documented as blocked.
 
 There is no compose matrix and no expected-output fixture set in this release. What exists
 instead is documented below: the exact verification that was performed, and — just as
@@ -152,7 +160,8 @@ Read this before trusting the version gating.
 | **A managed platform other than Neon** | None reachable. | The fingerprints in `00_preflight.sql` and `reference/platforms.md` are written from published role and setting names and are **not** confirmed against a current RDS, Aurora, Cloud SQL, Azure, Supabase, Timescale or Heroku instance. **Neon is now the exception**: verified 2026-09-02 against PostgreSQL 17.10, where the `neon_superuser` fingerprint matched, `platform_skip` correctly suppressed 8 checks, and the P1 band went from 5 false positives to empty. |
 | **`PG-IDX-016`** (GIN pending list) | Needs `pgstatginindex()` from `pgstattuple`, and reads index pages. | Marked `status=planned` in the registry. No SQL file exists; `bin/build.py` reports it rather than failing. |
 | **The deep pass** | Every cost-2 PostgreSQL check reads the server log or the host. | `deep-cluster.sql` and `deep-database.sql` are generated with **zero checks**. `PG-VAC-011`, `PG-CORR-005`, `PG-REL-011` and `PG-REL-014` are declared in the registry with `source=log` and are not implemented. |
-| **Host and interview checks** | Need a shell on the database host, a saved snapshot, or a recorded answer. | `PG-CAP-001`, `PG-CAP-002`, `PG-CAP-003`, `PG-CAP-006`, `PG-INFO-002`, `PG-BAK-008`, `PG-BAK-009`, `PG-CFG-005` and `PG-REL-001` through `PG-REL-004` are registry rows the CLI does not yet evaluate. They are reported as skipped rather than as clear. |
+| **Host and interview checks** | Need a shell on the database host or a recorded interview answer. | `PG-CAP-001`, `PG-CAP-002`, `PG-INFO-002`, `PG-BAK-008` and `PG-BAK-009` are registry rows the CLI does not evaluate. They are reported as skipped rather than as clear. |
+| **Snapshot-diff checks** | `--save` / `--compare` do not exist. | `PG-CAP-003` (projected disk-full) and `PG-CAP-006` (growth since last snapshot) need two runs to diff. They are named in `XX-META-001` with that reason, so the report never implies they came back clean. |
 | **Non-ASCII identifiers** | Not in the fixture. | Object names are emitted through `format('%I.%I.%I', ...)`, which was spot-checked against a table named `"Weird.Name tbl"` and quoted it correctly. Non-ASCII names, and identifiers longer than 63 bytes, were not tested. |
 | **`versions.yml` dates** | Transcribed from the published support policies rather than fetched. | `XX-META-004` exists precisely to nag about this, and the `REL` findings drop to `confidence: low` when the file is stale. |
 | **Very large estates** | The fixture database is 168 MB. | The `> 50,000 relations` sampling path (`XX-META-007`) and the cost-1 checks' behaviour at that scale are untested. |
