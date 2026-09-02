@@ -1,0 +1,14 @@
+{
+  "name": "db-triage",
+  "description": "db-triage: a read-only, prioritized health check for PostgreSQL and MySQL/MariaDB, in the spirit of the SQL Server First Responder Kit.",
+  "owner": {
+    "name": "Ryan Posner"
+  },
+  "plugins": [
+    {
+      "name": "db-triage",
+      "source": "./",
+      "description": "Read-only, prioritized health check for PostgreSQL and MySQL/MariaDB \u2014 sp_Blitz for Postgres. 376 checks, ranked by how badly each one will hurt you."
+    }
+  ]
+}

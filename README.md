@@ -76,10 +76,38 @@ Full table: [`reference/priorities.md`](reference/priorities.md). Full catalog:
 
 ### As a Claude skill
 
-Copy the repository (or just `SKILL.md`) into `~/.claude/skills/db-triage/` and ask for a
-database health check. `SKILL.md` is self-sufficient: with only that file and a DSN, Claude
-runs a correct fast pass and produces a correctly formatted report. With the whole
-repository present it runs the full catalog and cites the per-check reference.
+One command, then ask for a database health check:
+
+```
+git clone https://github.com/<owner>/db-triage.git ~/.claude/skills/db-triage
+```
+
+Claude Code reads personal skills from `~/.claude/skills/<name>/SKILL.md`, and `SKILL.md`
+sits at this repository's root — so the clone lands it in the right place with `checks/`
+and `reference/` beside it. Restart Claude Code (or `/reload-plugins`), then `/db-triage`.
+For a team repository, clone into that repository's `.claude/skills/db-triage` and commit
+it, so everyone working there gets it.
+
+Or install it as a plugin, which also works from the plugin browser in the Claude desktop
+app:
+
+```
+/plugin marketplace add <owner>/db-triage
+/plugin install db-triage@db-triage
+```
+
+The non-interactive equivalent: `claude plugin install db-triage@<owner>/db-triage
+--scope user`.
+
+Either route gives the same skill. `SKILL.md` is self-sufficient — with only that file and
+a DSN, Claude runs a correct fast pass and produces a correctly formatted report — but with
+the repository present it runs the full 376-check catalog and cites the per-check
+reference. The skill looks for `checks/registry.csv` beside `SKILL.md` (clone layout) and
+two levels up (plugin layout, where the file is `skills/db-triage/SKILL.md`), and says in
+the report's META row which of the two passes it actually ran.
+
+`skills/db-triage/SKILL.md` is a generated copy of the root `SKILL.md`, written by
+`bin/build.py`. Edit the root file; `bin/build.py --check` fails if the copy has drifted.
 
 ### As a CLI
 
@@ -135,6 +163,8 @@ graphs, or invent an index definition. It points at the table and the statements
 
 ```
 SKILL.md                          Claude entry point; self-sufficient for a fast pass
+skills/db-triage/SKILL.md         GENERATED copy of the above, for the plugin layout
+.claude-plugin/                   plugin.json + marketplace.json, for /plugin install
 checks/registry.csv               THE catalog: one row per check, all metadata
 checks/postgres/
   01_session.sql                  the read-only contract, sourced before every batch

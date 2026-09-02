@@ -1,0 +1,19 @@
+{
+  "name": "db-triage",
+  "version": "0.1.0",
+  "description": "Read-only, prioritized health check for PostgreSQL and MySQL/MariaDB. Ranks what will hurt you first, never writes.",
+  "author": {
+    "name": "Ryan Posner"
+  },
+  "homepage": "https://github.com/ryanposner/db-triage",
+  "keywords": [
+    "postgres",
+    "postgresql",
+    "mysql",
+    "mariadb",
+    "database",
+    "health-check",
+    "dba",
+    "triage"
+  ]
+}

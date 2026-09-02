@@ -22,6 +22,7 @@ generate the MySQL ones too, which requires checks/mysql/ to be populated.
 """
 
 import argparse
+import json
 import csv
 import os
 import re
@@ -614,6 +615,134 @@ def gen_skill_block(prob):
     return n
 
 
+# The only frontmatter keys claude.ai accepts when a skill is uploaded there.
+# Claude Code ignores unknown keys, but the claude.ai packaging step rejects
+# them outright, so keeping to this set makes one file work in both places.
+SKILL_FRONTMATTER_ALLOWED = {
+    "name", "description", "license", "compatibility", "metadata", "allowed-tools",
+}
+PLUGIN_SKILL = os.path.join("skills", "db-triage", "SKILL.md")
+
+
+def _frontmatter_keys(text):
+    """Top-level YAML keys of the leading --- block. Deliberately dumb: the
+    frontmatter is hand-written and flat, so a real YAML parser is not worth a
+    dependency in a stdlib-only script."""
+    if not text.startswith("---\n"):
+        return None
+    body = text.split("---\n", 2)
+    if len(body) < 3:
+        return None
+    keys = []
+    for line in body[1].split("\n"):
+        if not line or line[0] in " \t#":
+            continue
+        m = re.match(r"([A-Za-z0-9_-]+):", line)
+        if m:
+            keys.append(m.group(1))
+    return keys
+
+
+def validate_skill_frontmatter(prob):
+    """SKILL.md must start with frontmatter, and carry only keys that survive a
+    claude.ai upload. `version` is the usual offender: it belongs under
+    metadata, with the real number in VERSION."""
+    p = path("SKILL.md")
+    if not os.path.exists(p):
+        prob.error("SKILL.md does not exist")
+        return
+    text = open(p, encoding="utf-8").read()
+    keys = _frontmatter_keys(text)
+    if keys is None:
+        prob.error("SKILL.md has no YAML frontmatter, or its opening --- is not line 1")
+        return
+    if "description" not in keys:
+        prob.error("SKILL.md frontmatter has no description; Claude cannot tell when to use it")
+    bad = [k for k in keys if k not in SKILL_FRONTMATTER_ALLOWED]
+    if bad:
+        prob.error("SKILL.md frontmatter has key(s) claude.ai will reject: %s "
+                   "(allowed: %s)" % (", ".join(sorted(bad)),
+                                      ", ".join(sorted(SKILL_FRONTMATTER_ALLOWED))))
+    # description + when_to_use share a 1536-character budget.
+    m = re.search(r"^description:\s*>-?\n((?:[ \t]+.*\n)+)", text, re.M)
+    if m:
+        desc = " ".join(l.strip() for l in m.group(1).split("\n") if l.strip())
+        if len(desc) > 1536:
+            prob.error("SKILL.md description is %d characters; the limit is 1536" % len(desc))
+        else:
+            prob.note("SKILL.md description is %d of 1536 characters" % len(desc))
+
+
+def validate_plugin(prob, check_only=False):
+    """The repo is installable two ways and both must stay coherent: cloned into
+    ~/.claude/skills/db-triage (SKILL.md at the root), or added as a plugin
+    marketplace (skills/db-triage/SKILL.md). The second is a generated copy of
+    the first; drift between them ships two different skills under one name."""
+    for rel, required in ((os.path.join(".claude-plugin", "plugin.json"), True),
+                          (os.path.join(".claude-plugin", "marketplace.json"), True)):
+        p = path(rel)
+        if not os.path.exists(p):
+            if required:
+                prob.error("%s is missing; the /plugin install route will not work" % rel)
+            continue
+        try:
+            data = json.load(open(p, encoding="utf-8"))
+        except ValueError as exc:
+            prob.error("%s is not valid JSON: %s" % (rel, exc))
+            continue
+        if rel.endswith("plugin.json"):
+            for key in ("name", "version", "description"):
+                if not data.get(key):
+                    prob.error("%s has no %s" % (rel, key))
+            version = open(path("VERSION"), encoding="utf-8").read().strip()
+            if data.get("version") != version:
+                prob.error("%s says version %s but VERSION says %s"
+                           % (rel, data.get("version"), version))
+        else:
+            if not data.get("plugins"):
+                prob.error("%s lists no plugins" % rel)
+
+    root = path("SKILL.md")
+    copy = path(PLUGIN_SKILL)
+    if not os.path.exists(copy):
+        # In --check the copy is a shipping requirement: without it the
+        # /plugin install route resolves to a plugin with no skill. During a
+        # generate run it is about to be written, so it is only a note.
+        if check_only:
+            prob.error("%s is missing; run bin/build.py to generate it" % PLUGIN_SKILL)
+        else:
+            prob.note("%s does not exist yet; generating it" % PLUGIN_SKILL)
+    elif os.path.exists(root):
+        a = open(root, encoding="utf-8").read()
+        b = open(copy, encoding="utf-8").read()
+        if a != b:
+            # Same reasoning as the missing case: a generate run is about to
+            # overwrite the copy, so drift only blocks --check. Otherwise drift
+            # would make the build refuse to run the very step that repairs it.
+            if check_only:
+                prob.error("%s has drifted from SKILL.md; run bin/build.py to regenerate it"
+                           % PLUGIN_SKILL)
+            else:
+                prob.note("%s has drifted from SKILL.md; regenerating it" % PLUGIN_SKILL)
+
+
+def gen_plugin_skill(prob):
+    """Mirror the root SKILL.md into the plugin layout. A copy rather than a
+    symlink: plugin sources are fetched over git and archive extraction, and a
+    dangling symlink there fails silently."""
+    root = path("SKILL.md")
+    if not os.path.exists(root):
+        return
+    copy = path(PLUGIN_SKILL)
+    os.makedirs(os.path.dirname(copy), exist_ok=True)
+    text = open(root, encoding="utf-8").read()
+    if os.path.exists(copy) and open(copy, encoding="utf-8").read() == text:
+        prob.note("%s is already in sync with SKILL.md" % PLUGIN_SKILL)
+        return
+    open(copy, "w", newline="\n", encoding="utf-8").write(text)
+    prob.note("wrote %s (copy of SKILL.md for the plugin layout)" % PLUGIN_SKILL)
+
+
 def gen_merged_registry(rows, prob):
     p = path("checks", "registry-all.csv")
     order = {"postgresql": 0, "any": 1, "mysql": 2, "mariadb": 3, "mysql,mariadb": 4}
@@ -649,6 +778,8 @@ def main():
     validate_session_version(prob)
     validate_readonly(prob)
     validate_embedded(rows, prob)
+    validate_skill_frontmatter(prob)
+    validate_plugin(prob, check_only=args.check)
 
     if args.check:
         return prob.report()
@@ -687,6 +818,7 @@ def main():
     n = gen_merged_registry(rows, prob)
     prob.note("wrote checks/registry-all.csv (%d rows)" % n)
     gen_skill_block(prob)
+    gen_plugin_skill(prob)
     return prob.report()
 
 
