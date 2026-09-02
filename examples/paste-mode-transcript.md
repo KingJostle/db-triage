@@ -19,14 +19,21 @@ what it produces.
 Save this file, then run the command. It needs `psql` and a connection; a role with
 `pg_monitor` gives the most complete result, and a plain login role still gets most of it.
 
+> `db-triage-preflight.sql` — `checks/postgres/00_preflight.sql`, and
 > `db-triage-fast.sql` — the embedded fast pass from `SKILL.md` §10, or
 > `checks/postgres/fast-cluster.sql` if you have the repository.
 
 ```
-psql "$YOUR_DSN" -X -q -f db-triage-fast.sql --csv > triage.csv 2>&1
+psql "$YOUR_DSN" -X -q -f db-triage-preflight.sql --csv >  triage.csv 2>&1
+psql "$YOUR_DSN" -X -q -f db-triage-fast.sql      --csv >> triage.csv 2>&1
 ```
 
-Then paste `triage.csv` back to me. Two notes before you run it:
+Then paste `triage.csv` back to me. Three notes before you run it:
+
+- The preflight line comes first for a reason. It is what tells me the version and whether
+  this is a managed platform. Without it I cannot apply the platform adaptations, so on RDS
+  or Neon I would report settings your provider owns and you cannot change — `fsync`,
+  `archive_mode`, `ssl` — as though they were your problems.
 
 - `2>&1` is deliberate. Some checks need privileges your role may not have; those raise a
   permission error, and I need to see the error next to the check it belongs to so I can

@@ -1457,10 +1457,10 @@ ORDER BY s.bloat_bytes DESC
 LIMIT :'pg_idx_006_top_n'::int;
 \echo '@@END PG-IDX-006'
 
--- ======== PG-IDX-008  P50  Unindexed foreign key on a large table ========
+-- ======== PG-IDX-008  P50  Unindexed foreign key on a large or write-active table ========
 \echo '@@CHECK PG-IDX-008'
 -- check: PG-IDX-008
--- title: Unindexed foreign key on a large table
+-- title: Unindexed foreign key on a large or write-active table
 -- priority: 50
 -- scope: relation
 -- cost: 1

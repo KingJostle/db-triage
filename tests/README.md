@@ -5,6 +5,23 @@
 | File | Purpose |
 |---|---|
 | `fixtures/postgres-provoke.sql` | **The only file in this repository that writes.** It deliberately creates the conditions db-triage detects, so the checks can be exercised against a real server instead of against a mock. |
+| `test_runner.py` | Pure-function regression tests for `bin/db-triage`: no database, no network, standard library only. Run with `python3 tests/test_runner.py`. |
+
+```bash
+python3 tests/test_runner.py        # 30 tests, ~0.01s
+```
+
+`test_runner.py` covers the three defects found when db-triage was first run against a
+managed platform (Neon, 2026-09-02), each of which distorted the report:
+
+1. **`platform_skip` was declared but never read.** Every managed-platform suppression in
+   the catalog was inert. On Neon that produced five P1 findings against a healthy database.
+2. **The per-database pass never changed database.** `run_psql` ignored its `dbname`
+   argument whenever a `--dsn` was given, so it re-scanned the DSN's own database once per
+   database in the estate: findings were duplicated N times *and every other database was
+   silently never looked at* while the report claimed it had been. This is the worse half of
+   the bug — the duplicates were merely the visible symptom.
+3. **`PG-IDX-008`'s title contradicted its condition**, calling an 8 kB table "large".
 
 There is no compose matrix and no expected-output fixture set in this release. What exists
 instead is documented below: the exact verification that was performed, and — just as
@@ -132,7 +149,7 @@ Read this before trusting the version gating.
 |---|---|---|
 | **PostgreSQL 11, 12, 13, 14, 15, 17, 18** | Only a 16.13 server was available in the build environment. | The version branches are written from the documented catalog changes and are **untested**. The specific risks: the `pg_stat_checkpointer` branch (PostgreSQL 17) in `PG-WAL-001`, `PG-WAL-009` and `PG-INFO-008`; the `pg_stat_bgwriter` branch below 16 in `PG-WAL-004`; the `pg_stat_statements` pre-1.8 branch (PostgreSQL 12 and older) in every `QRY` check; `PG-VAC-013`'s `max_version` gate. Each is a `\if` on a `\gset` probe, so a wrong branch produces a psql error next to its `@@CHECK` marker rather than a wrong answer — but it has not been seen. |
 | **A standby** | No replica was built. | `PG-REPL-008`, `PG-REPL-011`, `PG-REPL-016` and the standby-side behaviour of every `run_on` gate were exercised only through their gating (they correctly printed `@@SKIP` on a primary), not through their SQL. |
-| **A managed platform** | None reachable. | The platform fingerprints in `00_preflight.sql` and `reference/platforms.md` are written from the published role and setting names and are **not** confirmed against a current RDS, Aurora, Cloud SQL, Azure, Supabase, Neon, Timescale or Heroku instance. |
+| **A managed platform other than Neon** | None reachable. | The fingerprints in `00_preflight.sql` and `reference/platforms.md` are written from published role and setting names and are **not** confirmed against a current RDS, Aurora, Cloud SQL, Azure, Supabase, Timescale or Heroku instance. **Neon is now the exception**: verified 2026-09-02 against PostgreSQL 17.10, where the `neon_superuser` fingerprint matched, `platform_skip` correctly suppressed 8 checks, and the P1 band went from 5 false positives to empty. |
 | **`PG-IDX-016`** (GIN pending list) | Needs `pgstatginindex()` from `pgstattuple`, and reads index pages. | Marked `status=planned` in the registry. No SQL file exists; `bin/build.py` reports it rather than failing. |
 | **The deep pass** | Every cost-2 PostgreSQL check reads the server log or the host. | `deep-cluster.sql` and `deep-database.sql` are generated with **zero checks**. `PG-VAC-011`, `PG-CORR-005`, `PG-REL-011` and `PG-REL-014` are declared in the registry with `source=log` and are not implemented. |
 | **Host and interview checks** | Need a shell on the database host, a saved snapshot, or a recorded answer. | `PG-CAP-001`, `PG-CAP-002`, `PG-CAP-003`, `PG-CAP-006`, `PG-INFO-002`, `PG-BAK-008`, `PG-BAK-009`, `PG-CFG-005` and `PG-REL-001` through `PG-REL-004` are registry rows the CLI does not yet evaluate. They are reported as skipped rather than as clear. |
@@ -142,7 +159,10 @@ Read this before trusting the version gating.
 
 ## Adding a test
 
-There is no assertion framework here yet. The honest minimum for a new check is:
+`test_runner.py` asserts against the runner's pure functions and against `registry.csv`
+itself; there is still no assertion framework for the **SQL checks**, which need a live
+server. For runner or registry behaviour, add a case to `test_runner.py`. For a new check,
+the honest minimum is:
 
 1. Add a fixture statement that makes it fire, and list it in the fixture's summary block.
 2. Run the check file directly and confirm the `details` string contains the measured values

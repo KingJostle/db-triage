@@ -2809,7 +2809,7 @@ Read `reference/priorities.md` for what the priority numbers mean and
 ---
 
 <a id="pg-idx-008"></a>
-### PG-IDX-008 — Unindexed foreign key on a large table
+### PG-IDX-008 — Unindexed foreign key on a large or write-active table
 **Priority 50** · Indexes · scope: relation · cost 1 · source: sql · pass: fast · effort S / risk low · since 0.1.0
 
 **What fires it.** A foreign-key constraint with no index whose leading key columns equal conkey in order, and either the child table is 100 MB or larger or the referenced table has 1,000 or more updates plus deletes. A parent DELETE or key UPDATE then sequentially scans the child under a share lock.

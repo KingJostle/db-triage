@@ -149,7 +149,7 @@ Priority bands: **0** meta · **1** you get fired · **5** one step from fired �
 | 50 | IDX | [`PG-IDX-002`](../reference/checks-postgres.md#pg-idx-002) | Unused index 1 GB or larger | index | 1 | fast | sql | S/med | postgresql |
 | 50 | IDX | [`PG-IDX-004`](../reference/checks-postgres.md#pg-idx-004) | Duplicate indexes | index | 1 | fast | sql | S/low | postgresql |
 | 50 | IDX | [`PG-IDX-006`](../reference/checks-postgres.md#pg-idx-006) | Estimated B-tree bloat over 50 percent (500 MB or more wasted) | index | 1 | fast | sql | M/med | postgresql |
-| 50 | IDX | [`PG-IDX-008`](../reference/checks-postgres.md#pg-idx-008) | Unindexed foreign key on a large table | relation | 1 | fast | sql | S/low | postgresql |
+| 50 | IDX | [`PG-IDX-008`](../reference/checks-postgres.md#pg-idx-008) | Unindexed foreign key on a large or write-active table | relation | 1 | fast | sql | S/low | postgresql |
 | 50 | IDX | [`PG-IDX-010`](../reference/checks-postgres.md#pg-idx-010) | Large table with heavy sequential scans | relation | 1 | fast | sql | M/low | postgresql |
 | 50 | LOCK | [`MY-LOCK-002`](../reference/checks-mysql.md#my-lock-002) | Transaction waiting on a row lock for over 30 seconds | session | 0 | fast | sql | S/low | mysql,mariadb |
 | 50 | LOCK | [`MY-LOCK-005`](../reference/checks-mysql.md#my-lock-005) | Idle transaction holding locks for over 5 minutes | session | 0 | fast | sql | S/low | mysql,mariadb |

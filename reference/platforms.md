@@ -52,12 +52,35 @@ with four specific holes in it.
 
 ## Checks skipped by platform
 
-Derived from the registry's `platform_skip` column. `bin/build.py` regenerates this list.
+Derived from the registry's `platform_skip` column, and hand-maintained: keep it in step
+when you edit that column. `bin/db-triage` applies the column at runtime, drops the check,
+lists it in Appendix A with reason `platform`, and names every one of them in `XX-META-006`.
 
 | Platform | Checks skipped |
 |---|---|
 | rds, aurora, cloudsql, azure, supabase, neon | `PG-CORR-004` (data checksums disabled) |
 | rds, aurora, cloudsql, azure, supabase, neon, crunchy, timescale, alloydb, heroku | `PG-BAK-001` (no wal archiving: point-in-time recovery impossible); `PG-MEM-001` (shared_buffers at the shipped default); `PG-REL-013` (logging collector off with a stderr-only destination); `PG-SEC-001` (trust authentication reachable over the network); `PG-SEC-002` (cleartext password authentication over the network); `PG-SEC-003` (listening on all interfaces with world-open hba rules); `PG-SEC-004` (ssl disabled while accepting non-local connections); `PG-SEC-007` (trust authentication on the local socket) |
+| neon only | `PG-DUR-001` (fsync disabled); `PG-DUR-002` (full_page_writes disabled); `PG-CORR-003` (ignore_checksum_failure enabled); `PG-REPL-001` (synchronous replication configured but no synchronous standby connected) |
+
+### Why the four Neon-only rows
+
+Neon replaces the storage layer rather than tuning it. The compute node holds no durable
+state: WAL is quorum-committed to safekeepers and pages are served by the pageserver, so
+`fsync`, `full_page_writes` and the checksum settings are Neon's to set and the tenant role
+(`neondb_owner`) is **not** a superuser and cannot change them. `PG-REPL-001` is the sharper
+case: Neon sets `synchronous_standby_names = 'walproposer'`, and the walproposer is its
+safekeeper Paxos client rather than an ordinary standby, so it never appears in
+`pg_stat_replication`. The check's condition is therefore *always* true on Neon — it reports
+"every commit is hanging" against a cluster serving traffic normally, which is a false
+positive with no information content, not a threshold worth tuning.
+
+These four are skipped on `neon` **only**. On RDS and the others `fsync = off` is reachable
+through a parameter group, so there it is a real and serious finding.
+
+Verified against Neon PostgreSQL 17.10 (compute config at
+`/var/db/postgres/compute/pgdata/postgresql.conf`), 2026-09-02. This is the first entry in
+this file confirmed against a live managed instance; the rest are still written from
+published role and setting names.
 
 ## Privilege ladder
 

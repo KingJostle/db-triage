@@ -26,6 +26,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from urllib.parse import quote, urlsplit, urlunsplit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = open(os.path.join(ROOT, "VERSION")).read().strip()
@@ -202,6 +203,97 @@ def load_registry():
     return rows
 
 
+def split_platforms(value):
+    """Parse a ';'-separated platform list from the registry into normalised names.
+
+    Used for `platform_skip`. Matching is exact on the whole name, never a
+    substring, so a future platform called 'neonate' can never be silenced by a
+    row that names 'neon'.
+    """
+    if not value:
+        return []
+    return [p.strip().lower() for p in str(value).split(";") if p.strip()]
+
+
+def platform_priority_for(value, platform):
+    """Read `platform_priority` ('rds=100;neon=150') for one platform.
+
+    Returns the overriding priority, or None to keep the registry's own. A
+    malformed cell is ignored rather than aborting: a typo here must not take the
+    whole pass down, and bin/build.py's registry lint is where it should be caught.
+    """
+    if not value or not platform:
+        return None
+    want = platform.strip().lower()
+    for part in str(value).split(";"):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, pri = part.partition("=")
+        if name.strip().lower() != want:
+            continue
+        try:
+            return int(pri.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def dsn_with_database(dsn, dbname):
+    """Return `dsn` repointed at `dbname`, preserving everything else.
+
+    The per-database pass runs once per scanned database. Without this the DSN's
+    own database is re-scanned every time: its findings are duplicated once per
+    database in the estate, and the other databases are never actually looked at
+    while the report claims they were.
+    """
+    if dsn is None or not dbname:
+        return dsn
+    if re.match(r"^postgres(ql)?://", dsn, re.I):
+        parts = urlsplit(dsn)
+        return urlunsplit((parts.scheme, parts.netloc, "/" + quote(dbname),
+                           parts.query, parts.fragment))
+    # Keyword/value form. Rewrite in place rather than re-joining tokens, so a
+    # quoted value containing spaces (password='a b') survives untouched.
+    if re.search(r"(?:^|\s)(?:dbname|database)=", dsn, re.I):
+        return re.sub(r"((?:^|\s)(?:dbname|database)=)(?:'[^']*'|\S*)",
+                      lambda m: m.group(1) + dbname, dsn, count=1, flags=re.I)
+    return dsn + " dbname=" + dbname
+
+
+def dedupe_skips(skipped):
+    """Collapse identical skip records, preserving order.
+
+    The per-database pass reports its version and privilege gates once per scanned
+    database. "Skipped on every database" is one fact, not N — but two different
+    reasons for skipping the same check are two facts, and both are kept.
+    """
+    seen, out = set(), []
+    for s in skipped:
+        key = (s.get("check_id"), s.get("reason"))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
+
+
+def derived_finding(registry, check_id, details, evidence=None, confidence="high"):
+    """Build a finding the runner synthesises itself rather than reading from SQL.
+
+    Shaped exactly like an enriched finding, because it bypasses enrich().
+    """
+    r = registry.get(check_id)
+    if r is None:
+        return None
+    return {"check_id": check_id, "scope": r["scope"], "object": None,
+            "details": details, "evidence": evidence, "confidence": confidence,
+            "priority": int(r["priority"]), "category": r["category"],
+            "title": r["title"], "fix_effort": r["fix_effort"], "fix_risk": r["fix_risk"],
+            "ref": r["ref"], "docs_url": r["docs_url"], "cost": int(r["cost"]),
+            "source": r["source"], "engine": r["engine"], "suppressed": False}
+
+
 def threshold_var(check_id, key):
     return check_id.lower().replace("-", "_") + "_" + key
 
@@ -242,6 +334,9 @@ def find_client(engine):
 
 
 def run_psql(client, dsn, sql_file, extra_args, dbname=None, debug=False, timeout=600):
+    # A dbname must beat the database named in the DSN, or the per-database pass
+    # silently re-scans the DSN's own database once per database in the estate.
+    dsn = dsn_with_database(dsn, dbname)
     cmd = [client, "-X", "-q", "--csv", "-f", sql_file]
     cmd += extra_args
     if dsn:
@@ -523,6 +618,8 @@ def render_markdown(findings, run, skipped, suppressed, errors, next_actions=Non
     if run.get("platform") and run["platform"] != "self-managed":
         out.append("- Platform is %s: superuser is withheld, so the pg_hba, log-file and "
                    "WAL-directory checks could not run." % run["platform"])
+    if run.get("platform_unknown_offline"):
+        out.append("- %s." % run["platform_unknown_offline"])
     if errors:
         out.append("- %d check(s) raised an error and were not evaluated (Appendix A)." % len(errors))
     out.append("")
@@ -576,15 +673,44 @@ def render_csv(findings):
 
 # ---------------------------------------------------------------------- main
 
-def enrich(findings, registry, config):
+def enrich(findings, registry, config, platform=None, skipped=None):
+    """Attach registry metadata, drop platform-inapplicable checks, de-duplicate.
+
+    `platform` is the fingerprint from preflight. A check whose `platform_skip`
+    names it is dropped, because the provider owns the setting it reads and the
+    finding is noise — and it is recorded in `skipped` (once per check, not once
+    per finding) so the report states plainly that it did not run. `platform_priority`
+    re-prioritises instead of dropping.
+
+    De-duplication on (check_id, object, details) is defence in depth. Those three
+    together identify a finding: the same triple arriving twice always means one
+    pass ran twice over one database, never two genuinely different findings.
+    """
     rules = (config.get("skip") or [])
-    out, suppressed = [], []
+    plat = (platform or "").strip().lower()
+    out, suppressed, seen, noted = [], [], set(), set()
     for f in findings:
         r = registry.get(f["check_id"])
         if r is None:
             continue
+        if plat and plat in split_platforms(r.get("platform_skip")):
+            if f["check_id"] not in noted:
+                noted.add(f["check_id"])
+                if skipped is not None:
+                    skipped.append({
+                        "check_id": f["check_id"],
+                        "reason": "platform: %s owns this setting, so the check cannot "
+                                  "speak to it (registry platform_skip)" % plat})
+            continue
+        key = (f["check_id"], f.get("object"), f.get("details"))
+        if key in seen:
+            continue
+        seen.add(key)
         f = dict(f)
-        f.update({"priority": int(r["priority"]), "category": r["category"], "title": r["title"],
+        priority = platform_priority_for(r.get("platform_priority"), plat)
+        if priority is None:
+            priority = int(r["priority"])
+        f.update({"priority": priority, "category": r["category"], "title": r["title"],
                   "fix_effort": r["fix_effort"], "fix_risk": r["fix_risk"],
                   "ref": r["ref"], "docs_url": r["docs_url"], "cost": int(r["cost"]),
                   "source": r["source"], "engine": r["engine"], "suppressed": False})
@@ -651,9 +777,23 @@ def main():
     if args.offline:
         if not os.path.exists(args.offline):
             die("no such file: %s" % args.offline)
-        raw_blobs.append(open(args.offline, encoding="utf-8", errors="replace").read())
+        offline_text = open(args.offline, encoding="utf-8", errors="replace").read()
+        raw_blobs.append(offline_text)
         run["access"] = "offline (rung 4/5: evaluated a saved or pasted output file)"
         run["engine"] = "postgresql"
+        # Platform adaptations need the preflight fingerprint. If the paste includes
+        # preflight output, use it; otherwise say plainly that platform_skip could not
+        # be applied, rather than reporting provider-owned settings as findings.
+        offline_pre = parse_preflight(offline_text)
+        offline_core = (offline_pre.get("core") or [{}])[0]
+        run["platform"] = offline_core.get("platform")
+        if offline_core.get("version_short"):
+            run["server_version"] = offline_core["version_short"]
+        if not run["platform"]:
+            run["platform_unknown_offline"] = (
+                "no preflight output in the pasted file, so the platform is unknown and "
+                "platform_skip was not applied; on a managed provider some findings below "
+                "describe settings the provider owns")
     else:
         engine = args.engine
         if engine == "auto":
@@ -729,11 +869,34 @@ def main():
         skipped += s
         errors += e
 
-    findings, suppressed = enrich(findings, registry, config)
+    findings, suppressed = enrich(findings, registry, config,
+                                  platform=run.get("platform"), skipped=skipped)
+
+    # A managed platform changes what is knowable, not only what is true. Say so in
+    # the report body, not only in the skipped appendix: a check that did not run is
+    # not a check that came back clean.
+    platform = run.get("platform")
+    if platform and platform != "self-managed":
+        adapted = sorted({s["check_id"] for s in skipped
+                          if str(s.get("reason", "")).startswith("platform:")})
+        if adapted:
+            m6 = derived_finding(
+                registry, "XX-META-006",
+                "Platform fingerprinted as %s. %d check(s) did not run because the provider "
+                "owns the setting they read, so their silence is not evidence of health: %s. "
+                "Everything else — wraparound, bloat, slots, locks, indexes, roles and "
+                "workload — ran unchanged."
+                % (platform, len(adapted), ", ".join(adapted)),
+                {"platform": platform, "checks_skipped": adapted})
+            if m6:
+                findings.append(m6)
+                findings.sort(key=lambda f: (f["priority"], f["category"], f.get("object") or ""))
 
     for rule in expired_suppressions(config.get("skip")):
         skipped.append({"check_id": rule.get("check", rule.get("category", rule.get("object", "?"))),
                         "reason": "expired suppression (until %s) — ignored and reported" % rule.get("until")})
+
+    skipped = dedupe_skips(skipped)
 
     if args.category:
         want = {c.strip().upper() for c in args.category.split(",")}

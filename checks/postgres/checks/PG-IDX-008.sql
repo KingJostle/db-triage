@@ -1,5 +1,5 @@
 -- check: PG-IDX-008
--- title: Unindexed foreign key on a large table
+-- title: Unindexed foreign key on a large or write-active table
 -- priority: 50
 -- scope: relation
 -- cost: 1

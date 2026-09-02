@@ -1,5 +1,64 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **`platform_skip` was never read.** The column had been in `checks/registry.csv` since
+  0.1.0 and no code parsed it, so every managed-platform suppression in the catalog was
+  inert. `bin/db-triage` now applies it: the check is dropped, listed in Appendix A with
+  reason `platform`, and named in `XX-META-006` so a skipped check is never mistaken for a
+  clean one. `platform_priority` is now honoured too (format `rds=100;neon=150`), though no
+  row uses it yet.
+- **The per-database pass never changed database.** `run_psql` ignored its `dbname`
+  argument whenever `--dsn` was given, because the DSN carries its own database. Scanning an
+  estate therefore re-ran the per-database pass against the DSN's database once per
+  database: its findings were duplicated N times, **and every other database was silently
+  never examined** while the report listed it as scanned. New `dsn_with_database()` rewrites
+  the database in both URI and keyword DSN forms. Findings are additionally de-duplicated on
+  `(check_id, object, details)`, and skip records on `(check_id, reason)`.
+- **`PG-IDX-008` was titled "Unindexed foreign key on a large table"** while its condition
+  fires on `child ≥ 100 MB` **OR** `parent writes ≥ 1000`. On a real database where no child
+  table reached 8 MB, all 129 findings fired on the write-activity arm and the report called
+  8 kB tables large. Retitled to "Unindexed foreign key on a large or write-active table".
+  The `details` string already named both thresholds and is unchanged.
+- Paste mode now reads the platform from preflight output when the paste contains it, and
+  says in its caveats when it does not. The rung-4 command in `SKILL.md` is two lines now:
+  preflight, then the fast pass.
+
+### Changed
+- `PG-DUR-001` (fsync), `PG-DUR-002` (full_page_writes), `PG-CORR-003`
+  (ignore_checksum_failure) and `PG-REPL-001` (no synchronous standby) now carry
+  `platform_skip=neon`. Neon replaces the storage layer: the compute node is stateless,
+  durability is a safekeeper quorum, and `neondb_owner` is not a superuser and cannot change
+  any of them. `PG-REPL-001` is the sharpest case — Neon sets
+  `synchronous_standby_names = 'walproposer'`, and the walproposer never appears in
+  `pg_stat_replication`, so the check reported "every commit is hanging" against a cluster
+  serving traffic normally. Skipped on `neon` **only**: on RDS `fsync = off` is reachable
+  through a parameter group and remains a P1. Verified against Neon PostgreSQL 17.10 on
+  2026-09-02, where this took the P1 band from five false positives to empty.
+
+### Added
+- `tests/test_runner.py` — 33 pure-function regression tests for `bin/db-triage`, covering
+  all three defects above. No database, no network, standard library only.
+- `.claude-plugin/marketplace.json` and `.claude-plugin/plugin.json`, so the repository is
+  installable with `/plugin marketplace add <owner>/db-triage` and `/plugin install
+  db-triage@db-triage` — the route that also works from the Claude desktop plugin browser.
+  Validated with `claude plugin validate` (CLI 2.1.257).
+- `skills/db-triage/SKILL.md`, a generated copy of the root `SKILL.md` for the plugin
+  layout. `bin/build.py` writes it; `bin/build.py --check` fails if it has drifted, so the
+  two install routes cannot ship different skills under one name.
+- `bin/build.py` now validates `SKILL.md` frontmatter: the opening `---` must be line 1, a
+  `description` must be present and within the 1536-character budget, and no key may fall
+  outside the set claude.ai accepts on upload.
+
+### Changed
+- `SKILL.md` frontmatter: `version: 0.1.0` moved under `metadata:`. Claude Code ignores
+  unknown top-level keys, but the claude.ai packaging step rejects any key outside
+  `name`, `description`, `license`, `compatibility`, `metadata`, `allowed-tools` — so the
+  old frontmatter would have failed an upload. `VERSION` remains the source of truth.
+- `SKILL.md` §9 now locates `checks/registry.csv` in both layouts — beside `SKILL.md` in a
+  clone, or two levels up in the plugin layout — instead of assuming the clone layout.
+
 All notable changes to db-triage are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and db-triage uses
 [semantic versioning](https://semver.org/) with two project-specific rules:
