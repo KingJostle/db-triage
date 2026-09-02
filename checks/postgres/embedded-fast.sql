@@ -173,6 +173,16 @@ WHERE NOT pg_is_in_recovery()
   AND coalesce(nullif(trim((SELECT setting FROM pg_settings WHERE name = 'synchronous_standby_names')), ''), '') <> ''
   AND (SELECT setting FROM pg_settings WHERE name = 'synchronous_commit') NOT IN ('off', 'local')
   AND NOT EXISTS (SELECT 1 FROM pg_stat_replication WHERE sync_state IN ('sync', 'quorum'))
+  -- Neon names its own WAL service proposer in synchronous_standby_names so that
+  -- commits wait for it, but the proposer acknowledges via a Paxos quorum of
+  -- safekeepers rather than reporting sync_state 'sync' or 'quorum'. Without this
+  -- guard the test above reads a hang that is not happening. Fingerprint-guarded,
+  -- so the same name on a stock cluster still fires as the misconfiguration it is.
+  AND NOT (EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser')
+           AND (btrim(lower(trim((SELECT setting FROM pg_settings
+                                  WHERE name = 'synchronous_standby_names'))), '"''') = 'walproposer'
+                OR EXISTS (SELECT 1 FROM pg_stat_replication
+                           WHERE application_name = 'walproposer')))
 UNION ALL
 SELECT CASE WHEN coalesce(r.retained, 0) >= 10737418240 THEN 'PG-REPL-002'
             WHEN coalesce(r.retained, 0) >= 1073741824  THEN 'PG-REPL-003'

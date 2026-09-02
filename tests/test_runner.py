@@ -23,6 +23,7 @@ import csv
 import json
 import importlib.util
 import os
+import re
 import sys
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -602,6 +603,46 @@ class TestRegistryTitles(unittest.TestCase):
         self.assertIn("neon_superuser", sql,
                       "the walproposer exemption must be fingerprint-guarded, or the "
                       "same name on a stock cluster would be silently excused")
+
+
+class TestEmbeddedPassSync(unittest.TestCase):
+    """checks/postgres/embedded-fast.sql is hand-maintained and bin/build.py validates
+    only its markers, priorities and titles — never its SQL. So a fix applied to a
+    check file can silently fail to reach the embedded pass, which is the copy that
+    paste mode and every repo-less run actually execute."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.embedded = open(os.path.join(ROOT, "checks", "postgres", "embedded-fast.sql"),
+                            encoding="utf-8").read()
+        cls.marked = set(re.findall(r"-- CHECK (\S+) ", cls.embedded))
+
+    def test_platform_guards_reach_the_embedded_pass(self):
+        """If a check file exempts a managed platform in SQL, the embedded copy of
+        that same check must carry the exemption too, or the embedded pass reports a
+        false positive the full pass does not."""
+        for cid in sorted(self.marked):
+            path = os.path.join(ROOT, "checks", "postgres", "checks", "%s.sql" % cid)
+            if not os.path.exists(path):
+                continue
+            full = open(path, encoding="utf-8").read()
+            for fingerprint in ("neon_superuser", "rdsadmin", "cloudsqladmin"):
+                if fingerprint in full:
+                    with self.subTest(check=cid, fingerprint=fingerprint):
+                        self.assertIn(fingerprint, self.embedded,
+                                      "%s guards on %s but the embedded pass does not"
+                                      % (cid, fingerprint))
+
+    def test_repl_001_walproposer_guard_is_embedded(self):
+        self.assertIn("walproposer", self.embedded)
+        self.assertIn("neon_superuser", self.embedded)
+
+    def test_skill_md_inlines_the_current_embedded_pass(self):
+        """SKILL.md ships the embedded pass inline; if it is stale the skill is wrong
+        even when the repository is right."""
+        skill = open(os.path.join(ROOT, "SKILL.md"), encoding="utf-8").read()
+        self.assertIn("walproposer", skill,
+                      "run bin/build.py to re-inline embedded-fast.sql into SKILL.md")
 
 
 class TestRegistryIntegrity(unittest.TestCase):
