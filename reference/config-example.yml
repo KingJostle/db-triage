@@ -1,0 +1,76 @@
+# .db-triage.yml — the user's file, not the tool's.
+#
+# It lives with you, not inside db-triage, so it survives upgrades, re-runs and
+# a fresh clone. Search order:
+#   1. --config <path>
+#   2. ./.db-triage.yml
+#   3. ~/.config/db-triage/<target>.yml
+#   4. ~/.config/db-triage/default.yml
+#
+# db-triage parses a deliberately small subset of YAML: nested maps by
+# indentation, lists introduced with "- ", inline {a: 1} maps and [a, b] lists,
+# quoted and bare scalars, and # comments. It is not a full YAML parser and does
+# not pretend to be, so keep this file simple. Anything it cannot read is an
+# error rather than a silent misreading.
+#
+# It never contains a password, a DSN, or anything else that would be dangerous
+# to commit. Connection details come from PGPASSFILE, PGSERVICEFILE, ~/.my.cnf,
+# environment variables, or a --dsn you pass at run time.
+
+target: prod-pg-1
+engine: postgresql
+
+# ---------------------------------------------------------------- baseline
+# Facts about the host and the estate that db-triage cannot learn from SQL.
+# Supplying them turns several low-confidence checks into high-confidence ones,
+# and lets a few checks run at all.
+baseline:
+  ram_gb: 64                 # unlocks PG-MEM-002 and PG-MEM-003; without it they do not run
+  cpus: 16
+  storage: nvme              # hdd | ssd | nvme | cloud | unknown — drives PG-MEM-007
+  disk_total_gb: 2000
+  managed: none              # rds|aurora|cloudsql|azure|... — overrides the fingerprint
+  expected_superusers: [postgres, dba_admin]   # anything else is called out by PG-SEC-009
+  supervisor: systemd        # silences PG-REL-012 when something external restarts the cluster
+  backup_tool: pgbackrest    # where PG-BAK-008 looks for backup history
+  environment: production    # dev|staging|production — dev re-prioritises the DUR and SEC P1 rows,
+                             # visibly, rather than hiding them
+
+# ---------------------------------------------------------------- interview
+# Answers to the questions no query can ask. Each carries a date; answers older
+# than 180 days age out and XX-META-008 starts asking again.
+interview:
+  last_backup_success: 2026-09-01
+  last_restore_test: 2026-06-14
+  rpo_minutes: 5
+  rto_minutes: 60
+  monitoring: "Datadog agent on the replica, not the primary"
+
+# ---------------------------------------------------------------- thresholds
+# Override any number in the registry, per check. A key that the registry does
+# not declare for that check ABORTS the run: a typo must never silently disable
+# a check, which is the failure mode that makes a health check untrustworthy.
+thresholds:
+  PG-REPL-006: {lag_seconds: 900}          # this fleet tolerates 15 minutes of replica lag
+  PG-IDX-002:  {min_bytes: 5368709120}     # only care about unused indexes over 5 GB
+  PG-CONN-002: {conn_fraction: 0.60}       # pooler sized tight; warn earlier
+
+# ---------------------------------------------------------------- suppression
+# A suppressed finding is NOT deleted: it still appears in JSONL output with
+# suppressed: true, and the Markdown report says "n findings suppressed".
+# A `reason` is mandatory. An `until` in the past is ignored AND reported, so a
+# suppression cannot quietly become permanent.
+skip:
+  - check: PG-IDX-002
+    object: "reporting.public.events_legacy_idx"
+    reason: "used only by the quarterly regulatory extract, which runs on the replica"
+    until: 2027-01-01
+
+  - check: PG-CFG-001
+    reason: "config drift is tracked in Ansible; this is noise in our reports"
+
+  - category: INFO
+    reason: "we generate the estate inventory from Terraform state instead"
+
+  - object: "scratch_db"
+    reason: "throwaway database rebuilt nightly by CI"

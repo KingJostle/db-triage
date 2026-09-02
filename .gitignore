@@ -1,0 +1,30 @@
+# db-triage snapshots and rendered reports
+*.jsonl
+!examples/*.jsonl
+report*.md
+triage*.csv
+triage*.out
+.db-triage.yml            # your own config: never commit it, it names your hosts
+.db-triage.local.yml
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Test scratch
+tests/tmp/
+tests/out/
+pgdata/
+
+# transfer staging (safe to delete)
+.transfer/

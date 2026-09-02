@@ -1,0 +1,62 @@
+# db-triage — PostgreSQL and MySQL/MariaDB version data.
+#
+# WHAT THIS IS FOR. PG-REL-001 through PG-REL-004 are the only checks whose
+# answer lives outside the database: whether the running major version is past
+# end of life, is close to it, or is behind on minor releases. That information
+# rots, so it is data with a date on it rather than logic in a query.
+#
+# XX-META-004 fires when `as_of` is more than 180 days old, and the REL checks
+# drop to confidence: low when it does. That is deliberate: the tool is supposed
+# to nag its own maintainers.
+#
+# HOW TO UPDATE. Take the EOL dates from
+# https://www.postgresql.org/support/versioning/ and the latest minor releases
+# from https://www.postgresql.org/support/security/ (which also lists the CVEs
+# fixed in each). For MySQL use https://endoflife.date/mysql and Oracle's
+# lifetime-support policy; for MariaDB use https://mariadb.org/about/#maintenance-policy.
+# Then set `as_of` to today and run bin/build.py --check.
+#
+# VERIFY BEFORE TRUSTING. The values below were entered by the implementer from
+# the published schedules and have NOT been re-fetched from the vendor sites at
+# build time. Treat anything here as an assertion needing a check, which is
+# exactly how the REL findings phrase it.
+
+schema_version: 1
+as_of: 2026-09-02
+verified_by: "initial implementation; dates transcribed from the published support policies, not fetched"
+
+postgresql:
+  # PostgreSQL ships a minor release every quarter and supports each major for
+  # five years from its initial release. `latest_minor` is the newest minor
+  # known at `as_of`; a server two or more minors behind fires PG-REL-004.
+  eol_policy_url: https://www.postgresql.org/support/versioning/
+  majors:
+    11: {released: 2018-10-18, eol: 2023-11-09, latest_minor: "11.22", supported: false}
+    12: {released: 2019-10-03, eol: 2024-11-14, latest_minor: "12.22", supported: false}
+    13: {released: 2020-09-24, eol: 2025-11-13, latest_minor: "13.22", supported: false}
+    14: {released: 2021-09-30, eol: 2026-11-12, latest_minor: "14.19", supported: true}
+    15: {released: 2022-10-13, eol: 2027-11-11, latest_minor: "15.14", supported: true}
+    16: {released: 2023-09-14, eol: 2028-11-09, latest_minor: "16.10", supported: true}
+    17: {released: 2024-09-26, eol: 2029-11-08, latest_minor: "17.6",  supported: true}
+    18: {released: 2025-09-25, eol: 2030-11-14, latest_minor: "18.1",  supported: true}
+  # Minor releases whose absence should escalate PG-REL-004 from "two behind" to
+  # "one behind is enough". Add an entry when a minor fixes a remotely
+  # exploitable CVE; leave the list empty rather than guessing.
+  cve_minors: []
+
+mysql:
+  eol_policy_url: https://endoflife.date/mysql
+  majors:
+    "5.7":  {released: 2015-10-21, eol: 2023-10-31, latest_minor: "5.7.44", supported: false}
+    "8.0":  {released: 2018-04-19, eol: 2026-04-30, latest_minor: "8.0.43", supported: true}
+    "8.4":  {released: 2024-04-30, eol: 2032-04-30, latest_minor: "8.4.6",  supported: true, lts: true}
+    "9.0":  {released: 2024-07-01, eol: 2025-04-30, latest_minor: "9.0.1",  supported: false, innovation: true}
+  cve_minors: []
+
+mariadb:
+  eol_policy_url: https://mariadb.org/about/#maintenance-policy
+  majors:
+    "10.6":  {released: 2021-07-06, eol: 2026-07-06, latest_minor: "10.6.23", supported: true, lts: true}
+    "10.11": {released: 2023-02-16, eol: 2028-02-16, latest_minor: "10.11.14", supported: true, lts: true}
+    "11.4":  {released: 2024-05-29, eol: 2029-05-29, latest_minor: "11.4.8",  supported: true, lts: true}
+  cve_minors: []

@@ -1,0 +1,792 @@
+#!/usr/bin/env python3
+"""db-triage — read-only, prioritized health check for PostgreSQL and MySQL.
+
+Drives the `psql` (or `mysql`) client that a DBA already has, so it needs no
+database driver and no install: Python 3.9+, standard library only.
+
+    db-triage --dsn "postgres://readonly@host/db" --format markdown --out report.md
+    db-triage --mode inventory --format summary
+    db-triage --offline triage.csv --format markdown      # evaluate pasted output
+
+It never writes to the database. See the safety contract in SKILL.md; the
+session block in checks/postgres/01_session.sql is what enforces it.
+
+Exit codes: 0 = ran cleanly, 1 = findings at or below --fail-priority,
+2 = the run itself failed.
+"""
+
+import argparse
+import csv
+import io
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections import Counter, defaultdict
+from datetime import datetime, timezone
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VERSION = open(os.path.join(ROOT, "VERSION")).read().strip()
+
+FIXED_COLUMNS = ["check_id", "scope", "object", "details", "evidence_json", "confidence"]
+
+BANDS = [(0, "Meta"), (1, "You get fired"), (5, "One step from fired"), (10, "Active harm"),
+         (20, "Known-dangerous"), (50, "Fix this week"), (100, "Tuning detail"),
+         (150, "Hygiene"), (200, "Non-default config"), (230, "Security review"),
+         (240, "Workload profile"), (250, "Inventory"), (254, "Run metadata"), (255, "Credits")]
+
+MODE_CATEGORIES = {
+    "security": {"SEC", "META"},
+    "backup": {"BAK", "DUR", "CORR", "REPL", "META"},
+}
+
+
+def die(msg, code=2):
+    print("db-triage: %s" % msg, file=sys.stderr)
+    sys.exit(code)
+
+
+# --------------------------------------------------------------------- config
+
+def parse_mini_yaml(text):
+    """Minimal YAML reader for .db-triage.yml.
+
+    Supports exactly what the documented config uses: nested maps by
+    indentation, lists of scalars and of maps introduced with '- ', inline
+    flow maps ({a: 1, b: 2}) and flow lists ([a, b]), quoted and bare scalars,
+    integers, floats, booleans, null and '#' comments. It is not a YAML parser
+    and does not pretend to be; anything it does not understand raises, so a
+    config that needs more must be simplified rather than silently misread.
+    """
+    def scalar(v):
+        v = v.strip()
+        if v.startswith("#") or v == "":
+            return None
+        if v.startswith('"') and v.endswith('"'):
+            return v[1:-1]
+        if v.startswith("'") and v.endswith("'"):
+            return v[1:-1]
+        if v.startswith("{") and v.endswith("}"):
+            out = {}
+            body = v[1:-1].strip()
+            if body:
+                for part in split_top(body):
+                    k, _, val = part.partition(":")
+                    out[k.strip()] = scalar(val)
+            return out
+        if v.startswith("[") and v.endswith("]"):
+            body = v[1:-1].strip()
+            return [scalar(p) for p in split_top(body)] if body else []
+        low = v.lower()
+        if low in ("true", "yes", "on"):
+            return True
+        if low in ("false", "no", "off"):
+            return False
+        if low in ("null", "~", ""):
+            return None
+        if re.fullmatch(r"-?\d+", v):
+            return int(v)
+        if re.fullmatch(r"-?\d+\.\d+", v):
+            return float(v)
+        return v
+
+    def split_top(s):
+        parts, depth, cur = [], 0, ""
+        for ch in s:
+            if ch in "{[":
+                depth += 1
+            elif ch in "}]":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            parts.append(cur)
+        return parts
+
+    lines = []
+    for raw in text.splitlines():
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        lines.append((indent, raw.strip()))
+
+    def block(i, indent):
+        """Return (value, next_index) for the block starting at line i."""
+        if i >= len(lines):
+            return None, i
+        if lines[i][1].startswith("- "):
+            items = []
+            while i < len(lines) and lines[i][0] == indent and lines[i][1].startswith("- "):
+                rest = lines[i][1][2:].strip()
+                if ":" in rest and not rest.startswith(("{", "[")):
+                    # a map whose first key is inline with the dash
+                    k, _, v = rest.partition(":")
+                    item = {}
+                    if v.strip():
+                        item[k.strip()] = scalar(v)
+                    else:
+                        sub, i2 = block(i + 1, indent + 2)
+                        item[k.strip()] = sub
+                        i = i2 - 1
+                    i += 1
+                    while i < len(lines) and lines[i][0] > indent and not lines[i][1].startswith("- "):
+                        k2, _, v2 = lines[i][1].partition(":")
+                        if v2.strip():
+                            item[k2.strip()] = scalar(v2)
+                            i += 1
+                        else:
+                            sub, i = block(i + 1, lines[i][0] + 2)
+                            item[k2.strip()] = sub
+                    items.append(item)
+                else:
+                    items.append(scalar(rest))
+                    i += 1
+            return items, i
+        out = {}
+        while i < len(lines) and lines[i][0] == indent:
+            k, _, v = lines[i][1].partition(":")
+            k = k.strip()
+            if v.strip():
+                out[k] = scalar(v)
+                i += 1
+            else:
+                i += 1
+                if i < len(lines) and lines[i][0] > indent:
+                    sub, i = block(i, lines[i][0])
+                    out[k] = sub
+                else:
+                    out[k] = None
+        return out, i
+
+    value, _ = block(0, lines[0][0] if lines else 0)
+    return value or {}
+
+
+def load_config(explicit, target):
+    candidates = []
+    if explicit:
+        candidates.append(explicit)
+    else:
+        candidates.append(os.path.join(os.getcwd(), ".db-triage.yml"))
+        home = os.path.expanduser("~/.config/db-triage")
+        if target:
+            candidates.append(os.path.join(home, "%s.yml" % target))
+        candidates.append(os.path.join(home, "default.yml"))
+    for c in candidates:
+        if c and os.path.exists(c):
+            try:
+                return parse_mini_yaml(open(c, encoding="utf-8").read()), c
+            except Exception as exc:
+                die("could not read config %s: %s" % (c, exc))
+    return {}, None
+
+
+# ------------------------------------------------------------------- registry
+
+def load_registry():
+    rows = {}
+    for name in ("registry.csv", "registry-mysql.csv"):
+        p = os.path.join(ROOT, "checks", name)
+        if not os.path.exists(p):
+            continue
+        with open(p, newline="", encoding="utf-8") as fh:
+            for r in csv.DictReader(fh):
+                rows[r["check_id"]] = r
+    if not rows:
+        die("no registry found under %s/checks" % ROOT)
+    return rows
+
+
+def threshold_var(check_id, key):
+    return check_id.lower().replace("-", "_") + "_" + key
+
+
+def build_threshold_args(registry, config):
+    """-v overrides for every threshold the config changes. A key that is not in
+    the registry aborts the run: a typo must never silently disable a check."""
+    args = []
+    for cid, overrides in (config.get("thresholds") or {}).items():
+        row = registry.get(cid)
+        if row is None:
+            die("config sets thresholds for %s, which is not a known check" % cid)
+        known = {p.split("=")[0] for p in row["thresholds"].split(";") if p}
+        for key, value in (overrides or {}).items():
+            if key not in known:
+                die("config sets threshold %s for %s; that check declares %s"
+                    % (key, cid, sorted(known) or "no thresholds"))
+            args += ["-v", "%s=%s" % (threshold_var(cid, key), value)]
+    baseline = config.get("baseline") or {}
+    if baseline.get("ram_gb"):
+        ram = int(float(baseline["ram_gb"]) * 1024 ** 3)
+        for cid in ("PG-MEM-002", "PG-MEM-003"):
+            args += ["-v", "%s=%d" % (threshold_var(cid, "ram_bytes"), ram)]
+    if baseline.get("storage"):
+        args += ["-v", "%s=%s" % (threshold_var("PG-MEM-007", "storage_class"), baseline["storage"])]
+    return args
+
+
+# ---------------------------------------------------------------------- psql
+
+def find_client(engine):
+    names = {"postgres": ["psql"], "mysql": ["mysql", "mariadb"]}[engine]
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    die("no %s client found on PATH (looked for %s)" % (engine, ", ".join(names)))
+
+
+def run_psql(client, dsn, sql_file, extra_args, dbname=None, debug=False, timeout=600):
+    cmd = [client, "-X", "-q", "--csv", "-f", sql_file]
+    cmd += extra_args
+    if dsn:
+        cmd = [client, "-X", "-q", "--csv", "-d", dsn] + extra_args + ["-f", sql_file]
+    if dbname:
+        cmd = [c for c in cmd]
+        cmd += ["-v", "ON_ERROR_STOP=0"]
+    env = dict(os.environ)
+    if dbname and dsn is None:
+        env["PGDATABASE"] = dbname
+    if debug:
+        print("+ %s" % " ".join(cmd), file=sys.stderr)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        die("%s timed out after %ds running %s" % (client, timeout, sql_file))
+    except FileNotFoundError:
+        die("could not execute %s" % client)
+    # Errors go to stderr; the design puts them next to their marker, so merge.
+    return proc.stdout + proc.stderr, proc.returncode
+
+
+def parse_marked_output(text):
+    """Split marker-delimited psql --csv output into findings and run notes."""
+    findings, skipped, errors, notes = [], [], [], []
+    current, buf = None, []
+
+    def flush():
+        if current is None or not buf:
+            return
+        blob = "\n".join(buf)
+        try:
+            rdr = list(csv.reader(io.StringIO(blob)))
+        except csv.Error:
+            return
+        if not rdr:
+            return
+        header = rdr[0]
+        if header[:len(FIXED_COLUMNS)] != FIXED_COLUMNS:
+            return
+        for row in rdr[1:]:
+            if len(row) < len(FIXED_COLUMNS):
+                continue
+            rec = dict(zip(FIXED_COLUMNS, row[:len(FIXED_COLUMNS)]))
+            for k in ("object", "details", "evidence_json"):
+                if rec.get(k) == "":
+                    rec[k] = None
+            findings.append(rec)
+
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("@@CHECK "):
+            flush()
+            current, buf = s.split(" ", 1)[1].strip(), []
+            continue
+        if s.startswith("@@END"):
+            flush()
+            current, buf = None, []
+            continue
+        if s.startswith("@@SKIP "):
+            rest = s[len("@@SKIP "):].split(" ", 1)
+            skipped.append({"check_id": rest[0], "reason": rest[1] if len(rest) > 1 else "not applicable"})
+            continue
+        if s.startswith("@@") or s.startswith("@@CHECK-BLOCK"):
+            notes.append(s)
+            continue
+        if re.search(r"(ERROR|FATAL):", s):
+            errors.append({"check_id": current, "message": s})
+            continue
+        if s.startswith("psql:") or s.startswith("LINE ") or s.startswith("HINT:") or s.startswith("DETAIL:"):
+            continue
+        if current is not None:
+            buf.append(line)
+    flush()
+    return findings, skipped, errors, notes
+
+
+def parse_preflight(text):
+    out, current, buf = {}, None, []
+
+    def flush():
+        if current and buf:
+            try:
+                rows = list(csv.DictReader(io.StringIO("\n".join(buf))))
+            except csv.Error:
+                rows = []
+            out[current] = rows
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("@@PREFLIGHT "):
+            flush()
+            current, buf = s.split(" ", 2)[1], []
+            continue
+        if re.search(r"(ERROR|FATAL):", s):
+            if current:
+                out.setdefault("_errors", []).append({"section": current, "message": s})
+            continue
+        if current:
+            buf.append(line)
+    flush()
+    return out
+
+
+# -------------------------------------------------------------- suppressions
+
+def suppression_matches(rules, finding):
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        until = rule.get("until")
+        if until:
+            try:
+                if datetime.strptime(str(until), "%Y-%m-%d").date() < datetime.now(timezone.utc).date():
+                    continue  # expired: ignored, and reported by the caller
+            except ValueError:
+                pass
+        if rule.get("check") and rule["check"] != finding["check_id"]:
+            continue
+        if rule.get("category") and rule["category"] != finding.get("category"):
+            continue
+        if rule.get("object") and rule["object"] != (finding.get("object") or ""):
+            continue
+        if not any(k in rule for k in ("check", "category", "object")):
+            continue
+        return rule
+    return None
+
+
+def expired_suppressions(rules):
+    out = []
+    today = datetime.now(timezone.utc).date()
+    for rule in rules or []:
+        if isinstance(rule, dict) and rule.get("until"):
+            try:
+                if datetime.strptime(str(rule["until"]), "%Y-%m-%d").date() < today:
+                    out.append(rule)
+            except ValueError:
+                pass
+    return out
+
+
+# ------------------------------------------------------------------ rendering
+
+def load_next_actions():
+    """Pull the first sentence of each check's "How to fix" out of the reference
+    documents, so the report's "Do" line is the authored guidance rather than a
+    pointer to it. Degrades to the pointer when the reference is not installed."""
+    out = {}
+    for name in ("checks-postgres.md", "checks-mysql.md"):
+        path = os.path.join(ROOT, "reference", name)
+        if not os.path.exists(path):
+            continue
+        current = None
+        for line in open(path, encoding="utf-8"):
+            m = re.match(r'<a id="([a-z0-9\-]+)"></a>', line.strip())
+            if m:
+                current = m.group(1).upper()
+                continue
+            if current and line.startswith("**How to fix.**"):
+                out[current] = line[len("**How to fix.**"):].strip()
+                current = None
+    return out
+
+
+def band_of(priority):
+    for i, (p, _name) in enumerate(BANDS):
+        if priority <= p:
+            return BANDS[i][0]
+    return 255
+
+
+def render_summary(findings, run):
+    lines = ["# db-triage — %s — %s" % (run["target"], run["started"]), "", run["verdict"], ""]
+    counts = Counter((f["priority"], f["category"], f["title"]) for f in findings)
+    lines += ["| P | Category | Finding | Count | Top objects |", "|---|---|---|---|---|"]
+    for (p, cat, title), n in sorted(counts.items()):
+        objs = [f["object"] for f in findings
+                if (f["priority"], f["category"], f["title"]) == (p, cat, title) and f["object"]][:3]
+        lines.append("| %s | %s | %s | %d | %s |" % (p, cat, title, n, ", ".join(objs) or "—"))
+    return "\n".join(lines) + "\n"
+
+
+def render_markdown(findings, run, skipped, suppressed, errors, next_actions=None):
+    next_actions = next_actions or {}
+    visible = [f for f in findings if not f.get("suppressed")]
+    out = ["# db-triage — %s — %s" % (run["target"], run["started"]), "",
+           "**Verdict:** " + run["verdict"], ""]
+
+    meta = [f for f in visible if f["priority"] == 0]
+    if meta:
+        out += ["## 0. Read this first (META)", ""]
+        for f in meta:
+            out.append("- **%s** — %s" % (f["title"], f["details"]))
+        out.append("")
+
+    fixfirst, per_cat = [], Counter()
+    for f in sorted(visible, key=lambda f: (f["priority"], f["fix_effort"], f["check_id"])):
+        if f["priority"] == 0 or f["priority"] >= 200:
+            continue
+        if per_cat[f["category"]] >= 2:
+            continue
+        fixfirst.append(f)
+        per_cat[f["category"]] += 1
+        if len(fixfirst) == 5:
+            break
+    if fixfirst:
+        out += ["## 1. Fix first", ""]
+        for i, f in enumerate(fixfirst, 1):
+            tag = "P%s" % f["priority"]
+            if f["confidence"] == "low" and f["priority"] <= 10:
+                tag += ", unverified"
+            out += ["### %d. [%s] %s — %s%s" % (i, tag, f["check_id"], f["title"],
+                                                (" — " + f["object"]) if f["object"] else ""),
+                    "**What:** %s" % f["details"], ""]
+            action = next_actions.get(f["check_id"])
+            out.append("**Do:** %s" % (action or
+                       "See `%s` for the ordered fix; the safest option is listed first."
+                       % f["ref"]))
+            if f["priority"] <= 10:
+                out += ["", "**Validate:** re-run `%s` and confirm it no longer fires; the evidence "
+                            "object above names the exact numbers to re-measure." % f["check_id"],
+                        "", "**If it goes wrong:** see *False positives and caveats* in %s."
+                            % f["ref"]]
+            out += ["", "**Effort / risk:** %s / %s · Ref: `%s` · Docs: %s"
+                    % (f["fix_effort"], f["fix_risk"], f["ref"], f["docs_url"]), ""]
+
+    out += ["## 2. Rollup", "",
+            "Fired: %d · Skipped: %d · Suppressed: %d · Counters cover: %s · Access: %s"
+            % (len(visible), len(skipped), len(suppressed), run["stats_window"], run["access"]), ""]
+    cats = sorted({f["category"] for f in visible} | {"BAK", "WRAP", "CORR", "REPL"})
+    bands = [b for b, _ in BANDS if b <= 250]
+    out += ["| Category | " + " | ".join("P%d" % b for b in bands) + " | Worst |",
+            "|---" * (len(bands) + 2) + "|"]
+    for c in cats:
+        row = [c]
+        worst = None
+        for b in bands:
+            n = len([f for f in visible if f["category"] == c and f["priority"] == b])
+            row.append(str(n) if n else "·")
+            if n and worst is None:
+                worst = b
+        row.append("P%d" % worst if worst is not None else "clear")
+        out.append("| " + " | ".join(row) + " |")
+    out.append("")
+
+    punch = [f for f in visible if 0 < f["priority"] <= 150]
+    if punch:
+        out += ["## 3. Ranked punch list", "",
+                "| P | ID | Category | Finding | Object | Details | Effort/Risk | Conf |",
+                "|---|---|---|---|---|---|---|---|"]
+        for f in punch:
+            out.append("| %s | `%s` | %s | %s | %s | %s | %s/%s | %s |"
+                       % (f["priority"], f["check_id"], f["category"], f["title"],
+                          "`%s`" % f["object"] if f["object"] else "—",
+                          (f["details"] or "").replace("|", "\\|").replace("\n", " "),
+                          f["fix_effort"], f["fix_risk"], f["confidence"]))
+        out.append("")
+
+    for band, heading in [(200, "4. Configuration inventory (P200)"),
+                          (230, "5. Security review (P230)"),
+                          (240, "6. Workload profile (P240)"),
+                          (250, "7. Environment (P250)")]:
+        rows = [f for f in visible if f["priority"] == band]
+        if not rows:
+            continue
+        out += ["## %s" % heading, "", "<details><summary>%d row(s)</summary>" % len(rows), ""]
+        for f in rows:
+            out.append("- **%s**%s — %s" % (f["title"],
+                                            (" `%s`" % f["object"]) if f["object"] else "",
+                                            f["details"]))
+        out += ["", "</details>", ""]
+
+    out += ["## 8. Caveats", ""]
+    out.append("- Counters cover %s. Every rate above is measured over that window."
+               % run["stats_window"])
+    lowconf = [f for f in visible if f["confidence"] == "low" and f["priority"] <= 50]
+    for f in lowconf:
+        out.append("- `%s` is low confidence: %s" % (f["check_id"], f["title"]))
+    if run.get("platform") and run["platform"] != "self-managed":
+        out.append("- Platform is %s: superuser is withheld, so the pg_hba, log-file and "
+                   "WAL-directory checks could not run." % run["platform"])
+    if errors:
+        out.append("- %d check(s) raised an error and were not evaluated (Appendix A)." % len(errors))
+    out.append("")
+
+    out += ["## 9. What to run next", "",
+            "1. Work down section 1 in order; each item names the check to re-run to prove it.",
+            "2. Run the deep pass (`--mode deep`) for log scanning and measured (rather than "
+            "estimated) bloat. It costs real I/O, so run it off-peak.",
+            "3. Answer the backup interview and record it in `.db-triage.yml` so the "
+            "unverified backup findings stop firing.",
+            "4. Re-run with `--save`, then `--compare LAST` next week to see what moved.", ""]
+
+    if skipped or errors:
+        out += ["## Appendix A. Checks skipped", ""]
+        for s in skipped:
+            out.append("- `%s` — %s" % (s["check_id"], s["reason"]))
+        for e in errors:
+            out.append("- `%s` — error: %s" % (e.get("check_id") or "?", e["message"]))
+        out.append("")
+    if suppressed:
+        out += ["## Appendix B. Suppressed findings", ""]
+        for f in suppressed:
+            out.append("- `%s` %s — suppressed: %s"
+                       % (f["check_id"], f.get("object") or "", f.get("suppress_reason")))
+        out.append("")
+    out += ["## Appendix C. Run metadata", "",
+            "```json", json.dumps(run, indent=2, default=str), "```", ""]
+    out += ["---", "",
+            "*db-triage %s. Methodology modelled on Brent Ozar's SQL Server First Responder "
+            "Kit; no code copied, not affiliated with Brent Ozar Unlimited.*" % VERSION]
+    return "\n".join(out) + "\n"
+
+
+def render_jsonl(findings, run):
+    lines = [json.dumps({"type": "run", **run}, default=str)]
+    for f in findings:
+        lines.append(json.dumps(f, default=str))
+    return "\n".join(lines) + "\n"
+
+
+def render_csv(findings):
+    buf = io.StringIO()
+    cols = ["priority", "check_id", "category", "title", "scope", "object", "details",
+            "confidence", "fix_effort", "fix_risk", "ref", "docs_url", "suppressed"]
+    w = csv.DictWriter(buf, fieldnames=cols, extrasaction="ignore", lineterminator="\n")
+    w.writeheader()
+    for f in findings:
+        w.writerow(f)
+    return buf.getvalue()
+
+
+# ---------------------------------------------------------------------- main
+
+def enrich(findings, registry, config):
+    rules = (config.get("skip") or [])
+    out, suppressed = [], []
+    for f in findings:
+        r = registry.get(f["check_id"])
+        if r is None:
+            continue
+        f = dict(f)
+        f.update({"priority": int(r["priority"]), "category": r["category"], "title": r["title"],
+                  "fix_effort": r["fix_effort"], "fix_risk": r["fix_risk"],
+                  "ref": r["ref"], "docs_url": r["docs_url"], "cost": int(r["cost"]),
+                  "source": r["source"], "engine": r["engine"], "suppressed": False})
+        if f.get("evidence_json"):
+            try:
+                f["evidence"] = json.loads(f.pop("evidence_json"))
+            except (ValueError, TypeError):
+                f["evidence"] = None
+        rule = suppression_matches(rules, f)
+        if rule:
+            f["suppressed"] = True
+            f["suppress_reason"] = rule.get("reason", "no reason given")
+            suppressed.append(f)
+        out.append(f)
+    out.sort(key=lambda f: (f["priority"], f["category"], f.get("object") or ""))
+    return out, suppressed
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--engine", choices=["auto", "postgres", "mysql"], default="auto")
+    ap.add_argument("--dsn", help="connection URI or keyword string. Never pass a password "
+                                  "on the command line; use ~/.pgpass, PGPASSWORD or a URI.")
+    ap.add_argument("--mode", choices=["fast", "deep", "inventory", "security", "backup"],
+                    default="fast")
+    ap.add_argument("--databases", help="comma-separated database names to scan")
+    ap.add_argument("--all-databases", action="store_true")
+    ap.add_argument("--bring-the-pain", action="store_true",
+                    help="required with --all-databases above 50 databases")
+    ap.add_argument("--max-priority", type=int, default=None,
+                    help="hide findings above this priority number (50 for a daily job)")
+    ap.add_argument("--min-priority", type=int, default=None)
+    ap.add_argument("--category", help="comma-separated category codes")
+    ap.add_argument("--only", help="comma-separated check ids")
+    ap.add_argument("--skip", help="comma-separated check ids")
+    ap.add_argument("--config")
+    ap.add_argument("--target", default=None)
+    ap.add_argument("--format", choices=["markdown", "jsonl", "csv", "summary"], default="markdown")
+    ap.add_argument("--out")
+    ap.add_argument("--offline", help="evaluate a saved psql --csv output file instead of connecting")
+    ap.add_argument("--yes-deep-cost", action="store_true",
+                    help="run cost-2 checks without asking. Required for --mode deep non-interactively.")
+    ap.add_argument("--fail-priority", type=int, default=None,
+                    help="exit 1 when any finding is at or below this priority")
+    ap.add_argument("--debug", action="store_true", help="print every command that is run")
+    ap.add_argument("--version", action="version", version="db-triage %s" % VERSION)
+    args = ap.parse_args()
+
+    if "--password" in sys.argv:
+        die("db-triage never accepts a password on the command line; use ~/.pgpass, "
+            "PGPASSWORD, or a connection URI")
+
+    registry = load_registry()
+    config, config_path = load_config(args.config, args.target)
+    target = args.target or config.get("target") or os.environ.get("PGDATABASE") or "unnamed-target"
+    started = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    run = {"db_triage_version": VERSION, "target": target, "started": started,
+           "mode": args.mode, "config": config_path, "engine": None, "access": None,
+           "platform": None, "stats_window": "unknown"}
+
+    raw_blobs, preflight = [], {}
+    if args.offline:
+        if not os.path.exists(args.offline):
+            die("no such file: %s" % args.offline)
+        raw_blobs.append(open(args.offline, encoding="utf-8", errors="replace").read())
+        run["access"] = "offline (rung 4/5: evaluated a saved or pasted output file)"
+        run["engine"] = "postgresql"
+    else:
+        engine = args.engine
+        if engine == "auto":
+            engine = "postgres" if shutil.which("psql") else "mysql"
+        run["engine"] = "postgresql" if engine == "postgres" else "mysql"
+        client = find_client(engine)
+        run["access"] = "rung 1: %s" % client
+        base = os.path.join(ROOT, "checks", "postgres" if engine == "postgres" else "mysql")
+        if not os.path.isdir(base):
+            die("checks for engine %s are not installed in this copy of db-triage" % engine)
+        if engine == "mysql":
+            fast = os.path.join(base, "fast.sql")
+            if not os.path.exists(fast):
+                die("MySQL support is not installed in this copy (checks/mysql/fast.sql is missing)")
+            text, _rc = run_psql(client, args.dsn, fast, [], debug=args.debug)
+            raw_blobs.append(text)
+        else:
+            tvars = build_threshold_args(registry, config)
+            pre, _ = run_psql(client, args.dsn, os.path.join(base, "00_preflight.sql"),
+                              [], debug=args.debug)
+            preflight = parse_preflight(pre)
+            core = (preflight.get("core") or [{}])[0]
+            run["platform"] = core.get("platform")
+            run["server_version"] = core.get("version_short")
+            run["in_recovery"] = core.get("in_recovery")
+            run["connected_role"] = core.get("connected_role")
+            if core.get("earliest_stats_reset"):
+                run["stats_window"] = "since %s" % core["earliest_stats_reset"]
+
+            if args.mode == "deep" and not args.yes_deep_cost:
+                die("--mode deep runs cost-2 checks that read relation pages and log files. "
+                    "Re-run with --yes-deep-cost once you are happy to pay that I/O.", 2)
+
+            dbs = []
+            if args.databases:
+                dbs = [d.strip() for d in args.databases.split(",") if d.strip()]
+            else:
+                rows = preflight.get("databases") or []
+                usable = [r for r in rows if r.get("allow_conn") == "t" and r.get("is_template") != "t"]
+                dbs = [r["datname"] for r in usable]
+                if not args.all_databases:
+                    dbs = dbs[:5]
+                    if len(usable) > 5:
+                        run["databases_capped"] = "scanned 5 of %d; use --all-databases for the rest" % len(usable)
+                elif len(usable) > 50 and not args.bring_the_pain:
+                    die("--all-databases over %d databases needs --bring-the-pain" % len(usable))
+            run["databases"] = dbs
+
+            passes = {"fast": ["fast-cluster.sql"], "deep": ["fast-cluster.sql", "deep-cluster.sql"],
+                      "inventory": ["inventory.sql"], "security": ["fast-cluster.sql"],
+                      "backup": ["fast-cluster.sql"]}[args.mode]
+            for f in passes:
+                p = os.path.join(base, f)
+                if os.path.exists(p):
+                    text, _ = run_psql(client, args.dsn, p, tvars, debug=args.debug)
+                    raw_blobs.append(text)
+            dbpasses = {"fast": ["fast-database.sql"], "deep": ["fast-database.sql", "deep-database.sql"],
+                        "inventory": [], "security": ["fast-database.sql"],
+                        "backup": []}[args.mode]
+            for db in dbs:
+                for f in dbpasses:
+                    p = os.path.join(base, f)
+                    if not os.path.exists(p):
+                        continue
+                    dsn = args.dsn
+                    text, _ = run_psql(client, dsn, p, tvars, dbname=db, debug=args.debug)
+                    raw_blobs.append(text)
+
+    findings, skipped, errors = [], [], []
+    for blob in raw_blobs:
+        f, s, e, _n = parse_marked_output(blob)
+        findings += f
+        skipped += s
+        errors += e
+
+    findings, suppressed = enrich(findings, registry, config)
+
+    for rule in expired_suppressions(config.get("skip")):
+        skipped.append({"check_id": rule.get("check", rule.get("category", rule.get("object", "?"))),
+                        "reason": "expired suppression (until %s) — ignored and reported" % rule.get("until")})
+
+    if args.category:
+        want = {c.strip().upper() for c in args.category.split(",")}
+        want |= MODE_CATEGORIES.get(args.mode, set())
+        findings = [f for f in findings if f["category"] in want]
+    elif args.mode in MODE_CATEGORIES:
+        findings = [f for f in findings if f["category"] in MODE_CATEGORIES[args.mode]]
+    if args.only:
+        want = {c.strip().upper() for c in args.only.split(",")}
+        findings = [f for f in findings if f["check_id"] in want]
+    if args.skip:
+        drop = {c.strip().upper() for c in args.skip.split(",")}
+        findings = [f for f in findings if f["check_id"] not in drop]
+    if args.max_priority is not None:
+        findings = [f for f in findings if f["priority"] <= args.max_priority]
+    if args.min_priority is not None:
+        findings = [f for f in findings if f["priority"] >= args.min_priority]
+
+    visible = [f for f in findings if not f["suppressed"]]
+    worst = min([f["priority"] for f in visible if f["priority"] > 0], default=None)
+    urgent = len([f for f in visible if f["priority"] <= 10 and f["priority"] > 0])
+    run["checks_with_findings"] = len({f["check_id"] for f in visible})
+    run["findings"] = len(visible)
+    run["skipped"] = len(skipped)
+    run["suppressed"] = len(suppressed)
+    run["verdict"] = ("%d finding(s) need action today (P<=10); worst priority P%s. %s%s · %s mode · "
+                      "%d finding(s), %d check(s) skipped."
+                      % (urgent, worst if worst is not None else "-",
+                         (run.get("server_version") and "PostgreSQL %s" % run["server_version"]) or run["engine"],
+                         (" · %s" % run["platform"]) if run.get("platform") else "",
+                         args.mode, len(visible), len(skipped)))
+
+    if args.format == "markdown":
+        text = render_markdown(findings, run, skipped, suppressed, errors, load_next_actions())
+    elif args.format == "summary":
+        text = render_summary(visible, run)
+    elif args.format == "jsonl":
+        text = render_jsonl(findings, run)
+    else:
+        text = render_csv(findings)
+
+    if args.out:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+        print("wrote %s (%d findings, %d skipped, %d suppressed)"
+              % (args.out, len(visible), len(skipped), len(suppressed)), file=sys.stderr)
+    else:
+        sys.stdout.write(text)
+
+    if args.fail_priority is not None and worst is not None and worst <= args.fail_priority:
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
